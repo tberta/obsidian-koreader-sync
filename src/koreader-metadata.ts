@@ -27,12 +27,18 @@ export class KOReaderMetadata {
             const { bookmarks, annotations, doc_props, percent_finished } =
               jsonMetadata;
 
-            const title = doc_props?.title;
-            const authors = doc_props?.authors;
+            const sdrFallback = path.basename(path.dirname(file)).replace(/\.sdr$/, '');
+            const title = doc_props?.title || sdrFallback;
+            const authors = doc_props?.authors || 'Unknown';
 
             if (!title) {
-              console.warn(`KOReader: skipping ${file} - no title in doc_props`);
+              // sdrFallback is always non-empty (it is the directory name), so this
+              // branch is only reached if path.dirname returns something unexpected.
+              console.warn(`KOReader: skipping ${file} - could not determine title`);
               return;
+            }
+            if (!doc_props?.title) {
+              console.warn(`KOReader: no title in doc_props for ${file}, using folder name: "${sdrFallback}"`);
             }
 
             let normalizedBookmarks: any = null;
