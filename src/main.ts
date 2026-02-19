@@ -80,6 +80,9 @@ export default class KOReader extends Plugin {
   settings: KOReaderSettings;
 
   private manageTitle(title: string, options: TitleOptions = {}): string {
+    if (!title) {
+      return `${options.prefix || ''}${options.suffix || ''}`;
+    }
     // replace \ / and : with _
     title = title.replace(/\\|\/|:/g, '_');
     // replace multiple underscores with one underscore
@@ -386,12 +389,12 @@ export default class KOReader extends Plugin {
     // the page is always the first number in the bookmark's text (eg. 'Pagina 12 foo bar')
     const page = bookmark.text ? parseInt(bookmark.text.match(/\d+/g)[0]) : -1;
     const noteItself = bookmark.text
-      ? bookmark.text.split(bookmark.datetime)[1].replace(/^\s+|\s+$/g, '')
+      ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
       : '';
     const noteTitle = noteItself
       ? this.manageTitle(noteItself, this.settings.noteTitleOptions)
       : `${this.manageTitle(
-          bookmark.notes,
+          bookmark.notes || '',
           this.settings.noteTitleOptions
         )} - ${book.authors}`;
     const notePath = normalizePath(`${path}/${noteTitle}`);
@@ -598,14 +601,21 @@ return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}
                 keepInSync: this.settings.keepInSync,
               });
 
+            // If a file already exists at this path (stale import or title
+            // collision between two bookmarks), disambiguate with a short
+            // uniqueId suffix rather than failing.
+            let finalNotePath = notePath;
+            if (this.app.vault.getAbstractFileByPath(`${finalNotePath}.md`)) {
+              finalNotePath = `${notePath}_${uniqueId.substring(0, 6)}`;
+            }
             try {
               await this.app.vault.create(
-                `${notePath}.md`,
+                `${finalNotePath}.md`,
                 matter.stringify(content, frontmatterData)
               );
             } catch (e) {
-              console.error(`KOReader: failed to create note ${notePath}:`, e);
-              new Notice(`KOReader: failed to create note "${notePath}": ${e.message}`);
+              console.error(`KOReader: failed to create note ${finalNotePath}:`, e);
+              new Notice(`KOReader: failed to create note "${finalNotePath}": ${e.message}`);
               continue;
             }
           }
