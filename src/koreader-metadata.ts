@@ -21,23 +21,25 @@ export class KOReaderMetadata {
       find.on('match', (file: string) => {
         const filename = path.parse(file).base;
         if (filename.match(/metadata\..*\.lua$/)) {
-          const content = fs.readFileSync(file, 'utf8');
-          const jsonMetadata: any = parse(content);
-          const {
-            highlight,
-            bookmarks,
-            doc_props: { title },
-            doc_props: { authors },
-            percent_finished,
-          } = jsonMetadata;
-          if (Object.keys(highlight).length && Object.keys(bookmarks).length) {
-            metadatas[`${title} - ${authors}`] = {
-              title,
-              authors,
-              // highlight,
+          try {
+            const content = fs.readFileSync(file, 'utf8');
+            const jsonMetadata: any = parse(content);
+            const {
               bookmarks,
-              percent_finished: percent_finished * 100,
-            };
+              doc_props: { title },
+              doc_props: { authors },
+              percent_finished,
+            } = jsonMetadata;
+            if (bookmarks && Object.keys(bookmarks).length) {
+              metadatas[`${title} - ${authors}`] = {
+                title,
+                authors,
+                bookmarks,
+                percent_finished: percent_finished * 100,
+              };
+            }
+          } catch (e) {
+            console.error(`KOReader: failed to parse ${file}:`, e);
           }
         }
       });

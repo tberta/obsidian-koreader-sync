@@ -477,7 +477,7 @@ Page: <%= it.page %>
       [KOREADERKEY]: {
         uniqueId: crypto
           .createHash('md5')
-          .update(`${book.title} - ${book.authors}}`)
+          .update(`${book.title} - ${book.authors}`)
           .digest('hex'),
         type: NoteType.BOOK_NOTE,
         data: {
@@ -559,12 +559,12 @@ return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}
       // if aFolderForEachBook is set, create a folder for each book
       if (this.settings.aFolderForEachBook) {
         if (!this.app.vault.getAbstractFileByPath(path)) {
-          this.app.vault.createFolder(path);
+          await this.app.vault.createFolder(path);
         }
       }
       // if createDataviewQuery is set, create a dataview query, for each book, with the book's managed title (if it doesn't exist)
       if (this.settings.createDataviewQuery) {
-        this.createDataviewQueryPerBook(
+        await this.createDataviewQueryPerBook(
           {
             path,
             managedBookTitle,
@@ -598,10 +598,16 @@ return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}
                 keepInSync: this.settings.keepInSync,
               });
 
-            this.app.vault.create(
-              `${notePath}.md`,
-              matter.stringify(content, frontmatterData)
-            );
+            try {
+              await this.app.vault.create(
+                `${notePath}.md`,
+                matter.stringify(content, frontmatterData)
+              );
+            } catch (e) {
+              console.error(`KOReader: failed to create note ${notePath}:`, e);
+              new Notice(`KOReader: failed to create note "${notePath}": ${e.message}`);
+              continue;
+            }
           }
           this.settings.importedNotes[uniqueId] = true;
           // else if the note exists and keep_in_sync is true and yet_to_be_edited is false, we update it
@@ -620,7 +626,7 @@ return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}
             keepInSync: existingNotes[uniqueId]?.keep_in_sync,
           });
 
-          this.app.vault.modify(
+          await this.app.vault.modify(
             note,
             matter.stringify(content, frontmatterData)
           );
