@@ -24,18 +24,51 @@ export class KOReaderMetadata {
           try {
             const content = fs.readFileSync(file, 'utf8');
             const jsonMetadata: any = parse(content);
-            const {
-              bookmarks,
-              doc_props: { title },
-              doc_props: { authors },
-              percent_finished,
-            } = jsonMetadata;
-            if (bookmarks && Object.keys(bookmarks).length) {
+            const { bookmarks, annotations, doc_props, percent_finished } =
+              jsonMetadata;
+
+            const title = doc_props?.title;
+            const authors = doc_props?.authors;
+
+            if (!title) {
+              console.warn(`KOReader: skipping ${file} - no title in doc_props`);
+              return;
+            }
+
+            let normalizedBookmarks: any = null;
+
+            // New format (KOReader >= ~2024): highlights stored under "annotations".
+            // Each entry has: text (highlight), pageno (int page), chapter, datetime,
+            // pos0, pos1. There is no pre-formatted text string.
+            if (annotations && Object.keys(annotations).length) {
+              normalizedBookmarks = {};
+              for (const key of Object.keys(annotations)) {
+                const ann = annotations[key];
+                normalizedBookmarks[key] = {
+                  chapter: ann.chapter || '',
+                  // text is intentionally left empty: createNote() treats an empty
+                  // text as "new format" and reads the page from bookmark.page instead.
+                  text: '',
+                  notes: ann.text || '',       // highlight text lives in "text"
+                  datetime: ann.datetime || '',
+                  highlighted: true,
+                  pos0: ann.pos0 || '',
+                  pos1: ann.pos1 || '',
+                  page: String(ann.pageno ?? -1), // pageno is the integer page number
+                };
+              }
+            }
+            // Old format: highlights stored under "bookmarks".
+            else if (bookmarks && Object.keys(bookmarks).length) {
+              normalizedBookmarks = bookmarks;
+            }
+
+            if (normalizedBookmarks && Object.keys(normalizedBookmarks).length) {
               metadatas[`${title} - ${authors}`] = {
                 title,
-                authors,
-                bookmarks,
-                percent_finished: percent_finished * 100,
+                authors: authors || 'Unknown',
+                bookmarks: normalizedBookmarks,
+                percent_finished: (percent_finished || 0) * 100,
               };
             }
           } catch (e) {
@@ -44,8 +77,10 @@ export class KOReaderMetadata {
         }
       });
       find.on('error', (err: any) => {
-        console.log(err);
-        reject(err);
+        // Log but do not reject — a single traversal error should not abort the
+        // entire scan. The 'complete' event will still fire after all reachable
+        // files have been processed.
+        console.error('KOReader: file search error:', err);
       });
       find.on('complete', () => {
         resolve(metadatas);
