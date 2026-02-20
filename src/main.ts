@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import * as eta from 'eta';
+import { Eta } from 'eta';
 
 import {
   App,
@@ -79,6 +79,7 @@ const KOREADERKEY = 'koreader-sync';
 
 export default class KOReader extends Plugin {
   settings: KOReaderSettings;
+  private eta: Eta;
 
   private manageTitle(title: string, options: TitleOptions = {}): string {
     if (!title) {
@@ -138,8 +139,31 @@ export default class KOReader extends Plugin {
     }
   }
 
+  private async renderTemplate(
+    template: string,
+    data: object
+  ): Promise<{ body: string; extraFrontmatter: Record<string, any> }> {
+    // koreader-fm-template approach: template file has a YAML block-scalar key
+    // containing the Eta frontmatter template, keeping the file itself valid YAML.
+    const { data: templateFileFm, content: bodyTemplate } = matter(template, {});
+    if (templateFileFm['koreader-fm-template']) {
+      const renderedFm = this.eta.renderString(templateFileFm['koreader-fm-template'], data) as string;
+      const { data: extraFrontmatter } = matter(`---\n${renderedFm}\n---`, {});
+      const body = this.eta.renderString(bodyTemplate, data) as string;
+      return { body, extraFrontmatter };
+    }
+
+    // Legacy approach: rendered output starts with ---, parse it as frontmatter + body.
+    const rendered = this.eta.renderString(template, data) as string;
+    if (rendered.trimStart().startsWith('---')) {
+      const { data: extraFrontmatter, content: body } = matter(rendered, {});
+      return { body, extraFrontmatter };
+    }
+    return { body: rendered, extraFrontmatter: {} };
+  }
+
   async onload() {
-    eta.configure({
+    this.eta = new Eta({
       cache: true, // Make Eta cache templates
       autoEscape: false,
     });
