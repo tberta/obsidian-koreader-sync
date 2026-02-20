@@ -24,6 +24,46 @@ enum NoteType {
   BOOK_HIGHLIGHTS = 'koreader-sync-book-highlights',
 }
 
+const DEFAULT_NOTE_TEMPLATE = `## Title: [[<%= it.bookPath %>|<%= it.title %>]]
+
+### by: [[<%= it.authors.join(']], [[') %>]]
+
+### Chapter: <%= it.chapter %>
+
+Page: <%= it.page %>
+
+> <%= it.highlight %>
+
+<%= it.text %>`;
+
+const DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE = `# <%= it.title %>
+
+### by: [[<%= it.authors.join(']], [[') %>]]
+
+<progress value="<%= it.percent_finished %>" max="100"> </progress>
+<% it.bookmarks.forEach(function(b) { %>
+---
+
+### Chapter: <%= b.chapter %>
+
+Page: <%= b.page %>
+
+> <%= b.highlight %>
+
+<%= b.text %>
+<% }) %>`;
+
+const DEFAULT_DATAVIEW_TEMPLATE = `# Title: <%= it.data.title %>
+
+<progress value="<%= it.metadata.percent_finished %>" max="100"> </progress>
+\`\`\`dataviewjs
+const title = dv.current()['koreader-sync'].metadata.managed_title
+dv.pages().where(n => {
+return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}' && n['koreader-sync'].metadata.managed_book_title == title
+}).sort(p => p['koreader-sync'].data.page).forEach(p => dv.paragraph('![[' + p.file.path + ']]'))
+\`\`\`
+    `;
+
 interface KOReaderSettings {
   koreaderBasePath: string;
   obsidianNoteFolder: string;
@@ -145,7 +185,10 @@ export default class KOReader extends Plugin {
   ): Promise<{ body: string; extraFrontmatter: Record<string, any> }> {
     // koreader-fm-template approach: template file has a YAML block-scalar key
     // containing the Eta frontmatter template, keeping the file itself valid YAML.
-    const { data: templateFileFm, content: bodyTemplate } = matter(template, {});
+    // Normalize: ensure a blank line before closing --- so gray-matter/js-yaml correctly
+    // terminates the block scalar regardless of whether the user included one.
+    const normalizedTemplate = template.replace(/([^\n])\n---/g, '$1\n\n---');
+    const { data: templateFileFm, content: bodyTemplate } = matter(normalizedTemplate, {});
     if (templateFileFm['koreader-fm-template']) {
       const renderedFm = this.eta.renderString(templateFileFm['koreader-fm-template'], data) as string;
       const { data: extraFrontmatter } = matter(`---\n${renderedFm}\n---`, {});
@@ -388,37 +431,25 @@ export default class KOReader extends Plugin {
         )} - ${book.authors}`;
     const notePath = normalizePath(`${path}/${noteTitle}`);
 
-    const defaultTemplate = `## Title: [[<%= it.bookPath %>|<%= it.title %>]]
-
-### by: [[<%= it.authors %>]]
-
-### Chapter: <%= it.chapter %>
-
-Page: <%= it.page %>
-
-**==<%= it.highlight %>==**
-
-<%= it.text %>`;
-
     const templateFile = this.settings.customTemplate
       ? this.app.vault.getAbstractFileByPath(this.settings.templatePath)
       : null;
     const template = templateFile
       ? await this.app.vault.read(templateFile as TFile)
-      : defaultTemplate;
+      : DEFAULT_NOTE_TEMPLATE;
     const bookPath = normalizePath(`${path}/${managedBookTitle}`);
-    const content = (await eta.render(template, {
+    const { body, extraFrontmatter } = await this.renderTemplate(template, {
       bookPath,
       title: book.title,
-      authors: book.authors,
+      authors: book.authors?.split('\n').map(a => a.trim()).filter(a => a) ?? [],
       chapter: bookmark.chapter,
       highlight: bookmark.notes,
       text: noteItself,
       datetime: bookmark.datetime,
       page,
-    })) as string;
+    });
 
-    const frontmatterData: { [key: string]: FrontMatter } = {
+    const pluginFrontmatter: { [key: string]: FrontMatter } = {
       [KOREADERKEY]: {
         type: NoteType.SINGLE_NOTE,
         uniqueId,
@@ -431,15 +462,16 @@ Page: <%= it.page %>
           datetime: bookmark.datetime ?? '',
         },
         metadata: {
-          body_hash: crypto.createHash('md5').update(content).digest('hex'),
+          body_hash: crypto.createHash('md5').update(body).digest('hex'),
           keep_in_sync: keepInSync || this.settings.keepInSync,
           yet_to_be_edited: true,
           managed_book_title: managedBookTitle,
         },
       },
     };
+    const frontmatterData = { ...extraFrontmatter, ...pluginFrontmatter };
 
-    return { content, frontmatterData, notePath };
+    return { content: body, frontmatterData, notePath };
   }
 
   private async createBookHighlightsNote(params: {
@@ -470,40 +502,24 @@ Page: <%= it.page %>
       })
       .sort((a, b) => a.page - b.page);
 
-    const defaultTemplate = `# <%= it.title %>
-
-### by: <%= it.authors %>
-
-<progress value="<%= it.percent_finished %>" max="100"> </progress>
-<% it.bookmarks.forEach(function(b) { %>
----
-
-### Chapter: <%= b.chapter %>
-
-Page: <%= b.page %>
-
-**==<%= b.highlight %>==**
-
-<%= b.text %>
-<% }) %>`;
-
     const templateFile = this.settings.customSingleFileTemplate
       ? this.app.vault.getAbstractFileByPath(this.settings.singleFileTemplatePath)
       : null;
     const template = templateFile
       ? await this.app.vault.read(templateFile as TFile)
-      : defaultTemplate;
+      : DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE;
 
-    const content = (await eta.render(template, {
+    const { body, extraFrontmatter } = await this.renderTemplate(template, {
       title: book.title,
-      authors: book.authors,
+      authors: book.authors?.split('\n').map(a => a.trim()).filter(a => a) ?? [],
       percent_finished: book.percent_finished,
       bookmarks,
-    })) as string;
+    });
 
     const notePath = normalizePath(`${path}/${managedBookTitle}`);
 
     const frontmatterData = {
+      ...extraFrontmatter,
       [KOREADERKEY]: {
         type: NoteType.BOOK_HIGHLIGHTS,
         uniqueIds,
@@ -512,7 +528,7 @@ Page: <%= b.page %>
           authors: book.authors ?? '',
         },
         metadata: {
-          body_hash: crypto.createHash('md5').update(content).digest('hex'),
+          body_hash: crypto.createHash('md5').update(body).digest('hex'),
           percent_finished: book.percent_finished,
           managed_book_title: managedBookTitle,
           keep_in_sync: keepInSync ?? this.settings.keepInSync,
@@ -521,7 +537,7 @@ Page: <%= b.page %>
       },
     };
 
-    return { content, frontmatterData, notePath };
+    return { content: body, frontmatterData, notePath };
   }
 
   async createDataviewQueryPerBook(
@@ -566,33 +582,27 @@ Page: <%= b.page %>
       },
     };
 
-    const defaultTemplate = `# Title: <%= it.data.title %>
-
-<progress value="<%= it.metadata.percent_finished %>" max="100"> </progress>
-\`\`\`dataviewjs
-const title = dv.current()['koreader-sync'].metadata.managed_title
-dv.pages().where(n => {
-return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}' && n['koreader-sync'].metadata.managed_book_title == title
-}).sort(p => p['koreader-sync'].data.page).forEach(p => dv.paragraph(dv.fileLink(p.file.name, true), {style: 'test-css'}))
-\`\`\`
-    `;
-
     const templateFile = this.settings.customDataviewTemplate
       ? this.app.vault.getAbstractFileByPath(this.settings.dataviewTemplatePath)
       : null;
     const template = templateFile
       ? await this.app.vault.read(templateFile as TFile)
-      : defaultTemplate;
-    const content = (await eta.render(
+      : DEFAULT_DATAVIEW_TEMPLATE;
+    const { body, extraFrontmatter } = await this.renderTemplate(
       template,
       frontMatter[KOREADERKEY]
-    )) as string;
+    );
+    const mergedFrontmatter = {
+      ...extraFrontmatter,
+      cssclass: NoteType.BOOK_NOTE,
+      [KOREADERKEY]: frontMatter[KOREADERKEY],
+    };
     if (updateNote) {
-      this.app.vault.modify(updateNote, matter.stringify(content, frontMatter));
+      this.app.vault.modify(updateNote, matter.stringify(body, mergedFrontmatter));
     } else {
       this.app.vault.create(
         `${path}/${managedBookTitle}.md`,
-        matter.stringify(content, frontMatter)
+        matter.stringify(body, mergedFrontmatter)
       );
     }
   }
