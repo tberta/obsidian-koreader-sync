@@ -7,9 +7,13 @@ import {
   MarkdownView,
   Plugin,
   PluginSettingTab,
+  Scope,
+  SearchComponent,
   Setting,
   TAbstractFile,
   TFile,
+  TFolder,
+  ToggleComponent,
   normalizePath,
   Notice,
 } from 'obsidian';
@@ -780,12 +784,224 @@ export default class KOReader extends Plugin {
   }
 }
 
+class FolderSuggest {
+  private app: App;
+  private inputEl: HTMLInputElement;
+  private suggestEl: HTMLElement;
+  private items: TFolder[] = [];
+  private selectedIndex = 0;
+  private scope: Scope;
+  private isOpen = false;
+
+  constructor(app: App, inputEl: HTMLInputElement) {
+    this.app = app;
+    this.inputEl = inputEl;
+    this.scope = new Scope();
+    this.suggestEl = document.body.createDiv('suggestion-container');
+
+    this.scope.register([], 'ArrowUp', () => {
+      this.setSelected(this.selectedIndex - 1);
+      return false;
+    });
+    this.scope.register([], 'ArrowDown', () => {
+      this.setSelected(this.selectedIndex + 1);
+      return false;
+    });
+    this.scope.register([], 'Enter', () => {
+      this.selectItem(this.selectedIndex);
+      return false;
+    });
+    this.scope.register([], 'Escape', () => {
+      this.close();
+      return false;
+    });
+
+    inputEl.addEventListener('input', this.onInput.bind(this));
+    inputEl.addEventListener('focus', this.onInput.bind(this));
+    inputEl.addEventListener('blur', () => setTimeout(() => this.close(), 150));
+  }
+
+  private onInput() {
+    const query = this.inputEl.value.toLowerCase();
+    this.items = this.app.vault
+      .getAllLoadedFiles()
+      .filter((f): f is TFolder => f instanceof TFolder && f.path.toLowerCase().includes(query))
+      .slice(0, 20);
+
+    if (this.items.length === 0) {
+      this.close();
+      return;
+    }
+
+    this.render();
+    if (!this.isOpen) this.open();
+  }
+
+  private render() {
+    this.suggestEl.empty();
+    const inner = this.suggestEl.createDiv('suggestion');
+    this.items.forEach((folder, i) => {
+      const item = inner.createDiv('suggestion-item');
+      item.setText(folder.path);
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        this.selectItem(i);
+      });
+    });
+    this.setSelected(0);
+  }
+
+  private setSelected(index: number) {
+    const items = this.suggestEl.querySelectorAll<HTMLElement>('.suggestion-item');
+    if (items.length === 0) return;
+    this.selectedIndex = ((index % items.length) + items.length) % items.length;
+    items.forEach((el, i) => el.toggleClass('is-selected', i === this.selectedIndex));
+    items[this.selectedIndex]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  private selectItem(index: number) {
+    const folder = this.items[index];
+    if (folder) {
+      this.inputEl.value = folder.path;
+      this.inputEl.trigger('input');
+      this.close();
+    }
+  }
+
+  private open() {
+    (this.app as any).keymap.pushScope(this.scope);
+    const rect = this.inputEl.getBoundingClientRect();
+    this.suggestEl.style.cssText =
+      `position:fixed;top:${rect.bottom}px;left:${rect.left}px;width:${rect.width}px;z-index:var(--layer-modal)`;
+    document.body.appendChild(this.suggestEl);
+    this.isOpen = true;
+  }
+
+  private close() {
+    if (!this.isOpen) return;
+    (this.app as any).keymap.popScope(this.scope);
+    this.suggestEl.detach();
+    this.isOpen = false;
+  }
+}
+
+class FileSuggest {
+  private app: App;
+  private inputEl: HTMLInputElement;
+  private suggestEl: HTMLElement;
+  private items: TFile[] = [];
+  private selectedIndex = 0;
+  private scope: Scope;
+  private isOpen = false;
+
+  constructor(app: App, inputEl: HTMLInputElement) {
+    this.app = app;
+    this.inputEl = inputEl;
+    this.scope = new Scope();
+    this.suggestEl = document.body.createDiv('suggestion-container');
+
+    this.scope.register([], 'ArrowUp', () => {
+      this.setSelected(this.selectedIndex - 1);
+      return false;
+    });
+    this.scope.register([], 'ArrowDown', () => {
+      this.setSelected(this.selectedIndex + 1);
+      return false;
+    });
+    this.scope.register([], 'Enter', () => {
+      this.selectItem(this.selectedIndex);
+      return false;
+    });
+    this.scope.register([], 'Escape', () => {
+      this.close();
+      return false;
+    });
+
+    inputEl.addEventListener('input', this.onInput.bind(this));
+    inputEl.addEventListener('focus', this.onInput.bind(this));
+    inputEl.addEventListener('blur', () => setTimeout(() => this.close(), 150));
+  }
+
+  private onInput() {
+    if (this.inputEl.disabled) return;
+    const query = this.inputEl.value.toLowerCase();
+    this.items = this.app.vault
+      .getAllLoadedFiles()
+      .filter((f): f is TFile => f instanceof TFile && f.extension === 'md' && f.path.toLowerCase().includes(query))
+      .slice(0, 20);
+
+    if (this.items.length === 0) {
+      this.close();
+      return;
+    }
+
+    this.render();
+    if (!this.isOpen) this.open();
+  }
+
+  private render() {
+    this.suggestEl.empty();
+    const inner = this.suggestEl.createDiv('suggestion');
+    this.items.forEach((file, i) => {
+      const item = inner.createDiv('suggestion-item');
+      item.setText(file.path);
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        this.selectItem(i);
+      });
+    });
+    this.setSelected(0);
+  }
+
+  private setSelected(index: number) {
+    const items = this.suggestEl.querySelectorAll<HTMLElement>('.suggestion-item');
+    if (items.length === 0) return;
+    this.selectedIndex = ((index % items.length) + items.length) % items.length;
+    items.forEach((el, i) => el.toggleClass('is-selected', i === this.selectedIndex));
+    items[this.selectedIndex]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  private selectItem(index: number) {
+    const file = this.items[index];
+    if (file) {
+      this.inputEl.value = file.path;
+      this.inputEl.trigger('input');
+      this.close();
+    }
+  }
+
+  private open() {
+    (this.app as any).keymap.pushScope(this.scope);
+    const rect = this.inputEl.getBoundingClientRect();
+    this.suggestEl.style.cssText =
+      `position:fixed;top:${rect.bottom}px;left:${rect.left}px;width:${rect.width}px;z-index:var(--layer-modal)`;
+    document.body.appendChild(this.suggestEl);
+    this.isOpen = true;
+  }
+
+  private close() {
+    if (!this.isOpen) return;
+    (this.app as any).keymap.popScope(this.scope);
+    this.suggestEl.detach();
+    this.isOpen = false;
+  }
+}
+
 class KoreaderSettingTab extends PluginSettingTab {
   plugin: KOReader;
 
   constructor(app: App, plugin: KOReader) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  private getTemplateFolderPath(): string {
+    const app = this.app as any;
+    const coreFolder = app.internalPlugins?.getPluginById('templates')?.instance?.options?.folder;
+    if (coreFolder) return coreFolder;
+    const templaterFolder = app.plugins?.getPlugin('templater-obsidian')?.settings?.templates_folder;
+    if (templaterFolder) return templaterFolder;
+    return this.plugin.settings.obsidianNoteFolder;
   }
 
   display(): void {
@@ -811,15 +1027,10 @@ class KoreaderSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Highlights folder location')
       .setDesc('Vault folder to use for writing book highlight notes')
-      .addDropdown((dropdown) => {
-        const { files } = this.app.vault.adapter as any;
-        const folders = Object.keys(files).filter(
-          (key) => files[key].type === 'folder'
-        );
-        folders.forEach((val) => {
-          dropdown.addOption(val, val);
-        });
-        return dropdown
+      .addSearch((search) => {
+        new FolderSuggest(this.app, search.inputEl);
+        search
+          .setPlaceholder('Example: folder/subfolder')
           .setValue(this.plugin.settings.obsidianNoteFolder)
           .onChange(async (value) => {
             this.plugin.settings.obsidianNoteFolder = value;
@@ -893,58 +1104,66 @@ class KoreaderSettingTab extends PluginSettingTab {
 
     containerEl.createEl('h2', { text: 'View settings' });
 
+    let noteTemplateToggle: ToggleComponent;
+    let noteTemplateText: SearchComponent;
+
     new Setting(containerEl)
       .setName('Custom template')
       .setDesc('Use a custom template for the notes')
-      .addToggle((toggle) =>
-        toggle
+      .addToggle((toggle) => {
+        noteTemplateToggle = toggle;
+        return toggle
           .setValue(this.plugin.settings.customTemplate)
           .onChange(async (value) => {
             this.plugin.settings.customTemplate = value;
             await this.plugin.saveSettings();
-          })
-      );
+            noteTemplateText.setDisabled(!value);
+          });
+      });
 
     new Setting(containerEl)
       .setName('Template file')
-      .setDesc('The template file to use. Remember to add the ".md" extension')
-      .addText((text) =>
-        text
+      .setDesc('The template file to use')
+      .addSearch((search) => {
+        noteTemplateText = search;
+        new FileSuggest(this.app, search.inputEl);
+        search
           .setPlaceholder('templates/note.md')
           .setValue(this.plugin.settings.templatePath)
+          .setDisabled(!this.plugin.settings.customTemplate)
           .onChange(async (value) => {
             this.plugin.settings.templatePath = value;
             await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText('Export default')
+          .onClick(async () => {
+            const filePath = normalizePath(
+              `${this.getTemplateFolderPath()}/koreader-note-template.md`
+            );
+            try {
+              await this.plugin.app.vault.create(filePath, DEFAULT_NOTE_TEMPLATE);
+              this.plugin.settings.templatePath = filePath;
+              this.plugin.settings.customTemplate = true;
+              await this.plugin.saveSettings();
+              noteTemplateText.setValue(filePath).setDisabled(false);
+              noteTemplateToggle.setValue(true);
+              new Notice(`Template exported to ${filePath}`);
+            } catch (e) {
+              if (e.message?.includes('already exists')) {
+                new Notice(`Template already exists at ${filePath}`);
+              } else {
+                console.error(e);
+                new Notice(`Failed to export template: ${e.message}`);
+              }
+            }
           })
       );
 
     new Setting(containerEl)
-      .setName('Custom book template')
-      .setDesc('Use a custom template for the dataview')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.customDataviewTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.customDataviewTemplate = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Book template file')
-      .setDesc('The template file to use. Remember to add the ".md" extension')
-      .addText((text) =>
-        text
-          .setPlaceholder('templates/template-book.md')
-          .setValue(this.plugin.settings.dataviewTemplatePath)
-          .onChange(async (value) => {
-            this.plugin.settings.dataviewTemplatePath = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Create a dataview query')
+      .setName('Create a summary note per book with a dataview query')
       .setDesc(
         createFragment((frag) => {
           frag.appendText(
@@ -972,6 +1191,64 @@ class KoreaderSettingTab extends PluginSettingTab {
           })
       );
 
+    let dataviewTemplateToggle: ToggleComponent;
+    let dataviewTemplateText: SearchComponent;
+
+    new Setting(containerEl)
+      .setName('Custom book template')
+      .setDesc('Use a custom template for the dataview')
+      .addToggle((toggle) => {
+        dataviewTemplateToggle = toggle;
+        return toggle
+          .setValue(this.plugin.settings.customDataviewTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.customDataviewTemplate = value;
+            await this.plugin.saveSettings();
+            dataviewTemplateText.setDisabled(!value);
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Book template file')
+      .setDesc('The template file to use')
+      .addSearch((search) => {
+        dataviewTemplateText = search;
+        new FileSuggest(this.app, search.inputEl);
+        search
+          .setPlaceholder('templates/template-book.md')
+          .setValue(this.plugin.settings.dataviewTemplatePath)
+          .setDisabled(!this.plugin.settings.customDataviewTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.dataviewTemplatePath = value;
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText('Export default')
+          .onClick(async () => {
+            const filePath = normalizePath(
+              `${this.getTemplateFolderPath()}/koreader-dataview-template.md`
+            );
+            try {
+              await this.plugin.app.vault.create(filePath, DEFAULT_DATAVIEW_TEMPLATE);
+              this.plugin.settings.dataviewTemplatePath = filePath;
+              this.plugin.settings.customDataviewTemplate = true;
+              await this.plugin.saveSettings();
+              dataviewTemplateText.setValue(filePath).setDisabled(false);
+              dataviewTemplateToggle.setValue(true);
+              new Notice(`Template exported to ${filePath}`);
+            } catch (e) {
+              if (e.message?.includes('already exists')) {
+                new Notice(`Template already exists at ${filePath}`);
+              } else {
+                console.error(e);
+                new Notice(`Failed to export template: ${e.message}`);
+              }
+            }
+          })
+      );
+
     containerEl.createEl('h2', { text: 'Single file per book (experimental)' });
 
     new Setting(containerEl)
@@ -988,28 +1265,61 @@ class KoreaderSettingTab extends PluginSettingTab {
           })
       );
 
+    let singleFileTemplateToggle: ToggleComponent;
+    let singleFileTemplateText: SearchComponent;
+
     new Setting(containerEl)
       .setName('Custom combined-file template')
       .setDesc('Use a custom template for the combined book highlights file')
-      .addToggle((toggle) =>
-        toggle
+      .addToggle((toggle) => {
+        singleFileTemplateToggle = toggle;
+        return toggle
           .setValue(this.plugin.settings.customSingleFileTemplate)
           .onChange(async (value) => {
             this.plugin.settings.customSingleFileTemplate = value;
             await this.plugin.saveSettings();
-          })
-      );
+            singleFileTemplateText.setDisabled(!value);
+          });
+      });
 
     new Setting(containerEl)
       .setName('Combined file template path')
-      .setDesc('The template file to use. Remember to add the ".md" extension')
-      .addText((text) =>
-        text
+      .setDesc('The template file to use')
+      .addSearch((search) => {
+        singleFileTemplateText = search;
+        new FileSuggest(this.app, search.inputEl);
+        search
           .setPlaceholder('templates/book-highlights.md')
           .setValue(this.plugin.settings.singleFileTemplatePath)
+          .setDisabled(!this.plugin.settings.customSingleFileTemplate)
           .onChange(async (value) => {
             this.plugin.settings.singleFileTemplatePath = value;
             await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText('Export default')
+          .onClick(async () => {
+            const filePath = normalizePath(
+              `${this.getTemplateFolderPath()}/koreader-book-highlights-template.md`
+            );
+            try {
+              await this.plugin.app.vault.create(filePath, DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE);
+              this.plugin.settings.singleFileTemplatePath = filePath;
+              this.plugin.settings.customSingleFileTemplate = true;
+              await this.plugin.saveSettings();
+              singleFileTemplateText.setValue(filePath).setDisabled(false);
+              singleFileTemplateToggle.setValue(true);
+              new Notice(`Template exported to ${filePath}`);
+            } catch (e) {
+              if (e.message?.includes('already exists')) {
+                new Notice(`Template already exists at ${filePath}`);
+              } else {
+                console.error(e);
+                new Notice(`Failed to export template: ${e.message}`);
+              }
+            }
           })
       );
 
