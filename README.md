@@ -17,6 +17,40 @@ There ara four main settings:
 - `Keep in sync` that define if the plugin **should** keep the notes in sync with KOReader importing them again (see [sync](#sync))
 - `Create a folder for each book` if you are a fan of folders enabling this setting the **new notes** will be created in a subfolder named as the book itself
 
+### Single file per book (Book-highlights)
+
+Enable `Combine all highlights into one file per book` to create a single `.md` file per book that contains **all its highlights** in one place instead of one file per highlight.
+
+In this mode:
+- One note is created per book, named after the book title
+- All highlights are rendered sequentially (sorted by page), separated by horizontal rules
+- The note is updated when new highlights are found, but only if `keep_in_sync` is `true` and the note has not been manually edited (`yet_to_be_edited` remains `true`)
+
+The default template renders the book title, author(s), a reading-progress bar, and all highlights with their chapter and page number:
+
+```
+# <%= it.title %>
+
+### by: [[<%= it.authors.join(']], [[') %>]]
+
+<progress value="<%= it.percent_finished %>" max="100"> </progress>
+<% it.bookmarks.forEach(function(b) { %>
+---
+
+### Chapter: <%= b.chapter %>
+
+Page: <%= b.page %>
+
+> <%= b.highlight %>
+
+<%= b.text %>
+<% }) %>
+```
+
+Each bookmark (`b`) exposes: `chapter`, `page`, `highlight` (the highlighted passage), `text` (your annotation/note), and `datetime`.
+
+You can supply a custom template via `Custom combined-file template`. Use the **Export default** button in settings to export the built-in template as a starting point, then edit it and point the setting to your file.
+
 ### Danger Zone
 
 This area contains settings that can be useful in a very few edga cases and can be dangerous in a day to day usage.
