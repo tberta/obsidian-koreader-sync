@@ -28,11 +28,10 @@ export interface Books {
 export interface FrontMatterData {
   title: string;
   authors: string;
-  chapter: string;
-  page: number;
-  highlight: string;
-  datetime: string;
-  text: string;
+  chapter?: string;
+  page?: number;
+  highlight?: string;
+  datetime?: string;
 }
 
 export interface FrontMatterMetadata {
@@ -40,11 +39,13 @@ export interface FrontMatterMetadata {
   keep_in_sync: boolean;
   yet_to_be_edited: boolean;
   managed_book_title: string;
+  percent_finished?: number;
 }
 
 export interface FrontMatter {
   type: string;
-  uniqueId: string;
+  uniqueId?: string;
+  uniqueIds?: string[];
   data: FrontMatterData,
   metadata: FrontMatterMetadata,
 }

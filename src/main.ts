@@ -14,19 +14,14 @@ import {
   Notice,
 } from 'obsidian';
 import matter from 'gray-matter';
-import * as Diff from 'diff';
 import { Book, Bookmark, Books, FrontMatter } from './types';
 
 import { KOReaderMetadata } from './koreader-metadata';
 
-enum ErrorType {
-  NO_PLACEHOLDER_FOUND = 'NO_PLACEHOLDER_FOUND',
-  NO_PLACEHOLDER_NOTE_CREATED = 'NO_PLACEHOLDER_NOTE_CREATED',
-}
-
 enum NoteType {
   SINGLE_NOTE = 'koreader-sync-note',
   BOOK_NOTE = 'koreader-sync-dataview',
+  BOOK_HIGHLIGHTS = 'koreader-sync-book-highlights',
 }
 
 interface KOReaderSettings {
@@ -41,18 +36,25 @@ interface KOReaderSettings {
   templatePath?: string;
   dataviewTemplatePath?: string;
   createDataviewQuery: boolean;
+  singleFilePerBook: boolean;
+  customSingleFileTemplate: boolean;
+  singleFileTemplatePath?: string;
   importedNotes: { [key: string]: boolean };
   enbleResetImportedNotes: boolean;
+  bookFolderTemplate?: string;
 }
 
 const DEFAULT_SETTINGS: KOReaderSettings = {
   importedNotes: {},
   enbleResetImportedNotes: false,
+  bookFolderTemplate: '',
   keepInSync: false,
   aFolderForEachBook: false,
   customTemplate: false,
   customDataviewTemplate: false,
   createDataviewQuery: false,
+  singleFilePerBook: false,
+  customSingleFileTemplate: false,
   koreaderBasePath: '/media/user/KOBOeReader',
   obsidianNoteFolder: '/',
   noteTitleOptions: {
@@ -74,7 +76,6 @@ interface TitleOptions {
 }
 
 const KOREADERKEY = 'koreader-sync';
-const NOTE_TEXT_PLACEHOLDER = 'placeholder';
 
 export default class KOReader extends Plugin {
   settings: KOReaderSettings;
@@ -103,6 +104,38 @@ export default class KOReader extends Plugin {
     }
 
     return `${options.prefix || ''}${title}${options.suffix || ''}`;
+  }
+
+  private resolveBookPath(book: Book): { folder: string; basename: string } {
+    const tpl = this.settings.bookFolderTemplate?.trim();
+    if (!tpl) {
+      // backward-compat: honour aFolderForEachBook
+      const managedTitle = `${this.manageTitle(book.title, this.settings.bookTitleOptions)}-${book.authors}`;
+      return this.settings.aFolderForEachBook
+        ? { folder: managedTitle, basename: managedTitle }
+        : { folder: '', basename: managedTitle };
+    }
+    const sanitizedTitle   = this.manageTitle(book.title,   this.settings.bookTitleOptions);
+    const sanitizedAuthors = this.manageTitle(book.authors, {});
+    const resolved = tpl
+      .replace(/\{\{title\}\}/g,   sanitizedTitle)
+      .replace(/\{\{authors\}\}/g, sanitizedAuthors);
+    const lastSlash = resolved.lastIndexOf('/');
+    return lastSlash >= 0
+      ? { folder: resolved.slice(0, lastSlash), basename: resolved.slice(lastSlash + 1) }
+      : { folder: '', basename: resolved };
+  }
+
+  private async ensureFolder(folderPath: string) {
+    if (!folderPath) return;
+    const parts = normalizePath(folderPath).split('/');
+    let current = '';
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!this.app.vault.getAbstractFileByPath(current)) {
+        await this.app.vault.createFolder(current);
+      }
+    }
   }
 
   async onload() {
@@ -242,95 +275,24 @@ export default class KOReader extends Plugin {
   }
 
   private async updateMetadataText(file: TFile) {
-    const originalNote = await this.app.vault.cachedRead(file);
-    const text = await this.extractTextFromNote(originalNote);
-    if (text) {
-      // new Notice(`Text extracted: ${text}`);
-      const { data, content } = matter(originalNote, {});
-      const propertyPath = `${[KOREADERKEY]}.data.text`;
-      this.setObjectProperty(data, propertyPath, text);
-      const yetToBeEditedPropertyPath = `${[
-        KOREADERKEY,
-      ]}.metadata.yet_to_be_edited`;
-      this.setObjectProperty(data, yetToBeEditedPropertyPath, false);
-      this.app.vault.modify(file as TFile, matter.stringify(content, data, {}));
-    } else {
-      // new Notice('Text extraction failed');
-    }
-  }
-
-  // to detect where the note's text is in the whole document
-  // I'll create a new document with a 'placeholder' text and compare the two notes
-  // the text added where the 'placeholder' text is removed is the new text of the note
-  private async extractTextFromNote(note: string): Promise<string | void> {
-    const { data, content: originalContent } = matter(note, {}) as unknown as {
-      data: { [key: string]: FrontMatter };
-      content: string;
-    };
-    // create a new note with the same frontmatter and content created with the same template
-    // and noteItself equal to 'placeholder'
+    const raw = await this.app.vault.cachedRead(file);
+    const { data, content } = matter(raw, {});
     const frontMatter = data[KOREADERKEY];
-    // exit if it's not a koreader note
-    if (!frontMatter || frontMatter.type !== NoteType.SINGLE_NOTE) {
+    if (
+      !frontMatter ||
+      (frontMatter.type !== NoteType.SINGLE_NOTE &&
+       frontMatter.type !== NoteType.BOOK_HIGHLIGHTS)
+    ) {
       return;
     }
-    const path = this.settings.aFolderForEachBook
-      ? `${this.settings.obsidianNoteFolder}/${frontMatter.metadata.managed_book_title}`
-      : this.settings.obsidianNoteFolder;
-    // this is one of the worste things I've ever done and I'm sorry
-    // please don't judge me, I'm going to refactor this
-    // ideally using the same object as argument of the createNote function,
-    // for the template and in the frontmatter
-    let diff;
-    try {
-      const {
-        content: newContent,
-        frontmatterData,
-        notePath,
-      } = await this.createNote({
-        path,
-        uniqueId: '',
-        bookmark: {
-          chapter: frontMatter.data.chapter,
-          datetime: frontMatter.data.datetime,
-          notes: frontMatter.data.highlight,
-          highlighted: true,
-          pos0: 'pos0',
-          pos1: 'pos1',
-          page: `${frontMatter.data.page}`,
-          text: `Pagina ${frontMatter.data.page} ${frontMatter.data.highlight} @ ${frontMatter.data.datetime} ${NOTE_TEXT_PLACEHOLDER}`,
-        },
-        managedBookTitle: frontMatter.metadata.managed_book_title,
-        book: {
-          title: frontMatter.data.title,
-          authors: frontMatter.data.authors,
-          percent_finished: 1,
-          bookmarks: [],
-          highlight: frontMatter.data.highlight,
-        },
-        keepInSync: frontMatter.metadata.keep_in_sync,
-      });
-      diff = Diff.diffTrimmedLines(originalContent, newContent);
-    } catch (e) {
-      console.error(e);
-      throw new Error(ErrorType.NO_PLACEHOLDER_NOTE_CREATED);
-    }
-
-    // extract from 'diff' the new text of the note
-    // in the array is the element before the one whit 'added' to true and 'value' is 'placeholder'
-    const placeholderIndex = diff.findIndex(
-      (element) => element.added && element.value === NOTE_TEXT_PLACEHOLDER
-    );
-    if (placeholderIndex === -1) {
-      throw new Error(ErrorType.NO_PLACEHOLDER_FOUND);
-    }
-    // the new text is the value of the element before the placeholder index
-    const newText = diff[placeholderIndex - 1].value;
-    // exit if the new text is the same as the text in the frontmatter
-    if (newText === frontMatter.data.text) {
+    const currentHash = crypto.createHash('md5').update(content).digest('hex');
+    if (currentHash === frontMatter.metadata?.body_hash) {
       return;
     }
-    return newText;
+    // Body changed — user edited the note
+    this.setObjectProperty(data, `${KOREADERKEY}.metadata.yet_to_be_edited`, false);
+    this.setObjectProperty(data, `${KOREADERKEY}.metadata.body_hash`, currentHash);
+    await this.app.vault.modify(file, matter.stringify(content, data, {}));
   }
 
   private getObjectProperty(object: { [x: string]: any }, path: string) {
@@ -443,13 +405,94 @@ Page: <%= it.page %>
           page,
           highlight: bookmark.notes ?? '',
           datetime: bookmark.datetime ?? '',
-          text: noteItself,
         },
         metadata: {
           body_hash: crypto.createHash('md5').update(content).digest('hex'),
           keep_in_sync: keepInSync || this.settings.keepInSync,
           yet_to_be_edited: true,
           managed_book_title: managedBookTitle,
+        },
+      },
+    };
+
+    return { content, frontmatterData, notePath };
+  }
+
+  private async createBookHighlightsNote(params: {
+    path: string;
+    managedBookTitle: string;
+    book: Book;
+    uniqueIds: string[];
+    keepInSync?: boolean;
+  }): Promise<{ content: string; frontmatterData: object; notePath: string }> {
+    const { path, managedBookTitle, book, uniqueIds, keepInSync } = params;
+
+    // Build sorted bookmarks array
+    const bookmarks = Object.values(book.bookmarks)
+      .map((bookmark: Bookmark) => {
+        const page = bookmark.text
+          ? (parseInt(bookmark.text.match(/\d+/g)?.[0]) || -1)
+          : (parseInt(bookmark.page) || -1);
+        const text = bookmark.text
+          ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
+          : '';
+        return {
+          chapter: bookmark.chapter ?? '',
+          highlight: bookmark.notes ?? '',
+          text,
+          datetime: bookmark.datetime ?? '',
+          page,
+        };
+      })
+      .sort((a, b) => a.page - b.page);
+
+    const defaultTemplate = `# <%= it.title %>
+
+### by: <%= it.authors %>
+
+<progress value="<%= it.percent_finished %>" max="100"> </progress>
+<% it.bookmarks.forEach(function(b) { %>
+---
+
+### Chapter: <%= b.chapter %>
+
+Page: <%= b.page %>
+
+**==<%= b.highlight %>==**
+
+<%= b.text %>
+<% }) %>`;
+
+    const templateFile = this.settings.customSingleFileTemplate
+      ? this.app.vault.getAbstractFileByPath(this.settings.singleFileTemplatePath)
+      : null;
+    const template = templateFile
+      ? await this.app.vault.read(templateFile as TFile)
+      : defaultTemplate;
+
+    const content = (await eta.render(template, {
+      title: book.title,
+      authors: book.authors,
+      percent_finished: book.percent_finished,
+      bookmarks,
+    })) as string;
+
+    const notePath = normalizePath(`${path}/${managedBookTitle}`);
+
+    const frontmatterData = {
+      [KOREADERKEY]: {
+        type: NoteType.BOOK_HIGHLIGHTS,
+        uniqueIds,
+        data: {
+          title: book.title ?? '',
+          authors: book.authors ?? '',
+        },
+        metadata: {
+          body_hash: crypto.createHash('md5').update(content).digest('hex'),
+          percent_finished: book.percent_finished,
+          managed_book_title: managedBookTitle,
+          keep_in_sync: keepInSync ?? this.settings.keepInSync,
+          yet_to_be_edited: true,
         },
       },
     };
@@ -554,20 +597,73 @@ return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}
     });
 
     for (const book in data) {
-      const managedBookTitle = `${this.manageTitle(
-        data[book].title,
-        this.settings.bookTitleOptions
-      )}-${data[book].authors}`;
-      // if the setting aFolderForEachBook is true, we add the managedBookTitle to the path specified in obsidianNoteFolder
-      const path = this.settings.aFolderForEachBook
-        ? `${this.settings.obsidianNoteFolder}/${managedBookTitle}`
+      const { folder, basename } = this.resolveBookPath(data[book]);
+      const managedBookTitle = basename;
+      const path = folder
+        ? `${this.settings.obsidianNoteFolder}/${folder}`
         : this.settings.obsidianNoteFolder;
-      // if aFolderForEachBook is set, create a folder for each book
-      if (this.settings.aFolderForEachBook) {
-        if (!this.app.vault.getAbstractFileByPath(path)) {
-          await this.app.vault.createFolder(path);
+      await this.ensureFolder(path);
+
+      // Single-file-per-book mode: one combined note per book
+      if (this.settings.singleFilePerBook) {
+        const filePath = `${path}/${managedBookTitle}.md`;
+        const uniqueIds = Object.keys(data[book].bookmarks).map((bk) =>
+          crypto
+            .createHash('md5')
+            .update(
+              `${data[book].title} - ${data[book].authors} - ${data[book].bookmarks[bk as any].pos0} - ${data[book].bookmarks[bk as any].pos1}`
+            )
+            .digest('hex')
+        );
+
+        const existingFile = this.app.vault.getAbstractFileByPath(filePath) as TFile | null;
+        if (!existingFile) {
+          const { content, frontmatterData } = await this.createBookHighlightsNote({
+            path,
+            managedBookTitle,
+            book: data[book],
+            uniqueIds,
+            keepInSync: this.settings.keepInSync,
+          });
+          try {
+            await this.app.vault.create(filePath, matter.stringify(content, frontmatterData));
+          } catch (e) {
+            console.error(`KOReader: failed to create book highlights note ${filePath}:`, e);
+            new Notice(`KOReader: failed to create book highlights note "${filePath}": ${e.message}`);
+          }
+        } else {
+          // File exists — check if any uniqueId is new
+          const raw = await this.app.vault.read(existingFile);
+          const { data: fmData } = matter(raw, {});
+          const existingFm = fmData[KOREADERKEY];
+          if (existingFm?.type === NoteType.BOOK_HIGHLIGHTS) {
+            const existingIds: string[] = existingFm?.uniqueIds ?? [];
+            const hasNew = uniqueIds.some((id) => !existingIds.includes(id));
+            if (hasNew) {
+              const keepInSync = existingFm?.metadata?.keep_in_sync ?? false;
+              const yetToBeEdited = existingFm?.metadata?.yet_to_be_edited ?? true;
+              // Re-sync only when keep_in_sync is enabled and user hasn't edited the note yet
+              if (keepInSync && yetToBeEdited) {
+                const { content, frontmatterData } = await this.createBookHighlightsNote({
+                  path,
+                  managedBookTitle,
+                  book: data[book],
+                  uniqueIds,
+                  keepInSync,
+                });
+                await this.app.vault.modify(existingFile, matter.stringify(content, frontmatterData));
+              }
+            }
+          }
         }
+
+        // Mark all uniqueIds as imported
+        for (const id of uniqueIds) {
+          this.settings.importedNotes[id] = true;
+        }
+        continue;
       }
+
       // if createDataviewQuery is set, create a dataview query, for each book, with the book's managed title (if it doesn't exist)
       if (this.settings.createDataviewQuery) {
         await this.createDataviewQueryPerBook(
@@ -738,6 +834,29 @@ class KoreaderSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName('Book path template')
+      .setDesc(
+        createFragment((frag) => {
+          frag.appendText(
+            'Template for the book path relative to the highlights folder. ' +
+            'Available variables: {{title}}, {{authors}}. ' +
+            '{{title}} is processed using the book title settings below. ' +
+            'E.g. {{authors}}/{{title}} groups books in per-author folders. ' +
+            'Leave empty to use the \'Create a folder for each book\' toggle.'
+          );
+        })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('{{authors}}/{{title}}')
+          .setValue(this.plugin.settings.bookFolderTemplate ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.bookFolderTemplate = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     containerEl.createEl('h2', { text: 'View settings' });
 
     new Setting(containerEl)
@@ -815,6 +934,47 @@ class KoreaderSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.createDataviewQuery)
           .onChange(async (value) => {
             this.plugin.settings.createDataviewQuery = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl('h2', { text: 'Single file per book (experimental)' });
+
+    new Setting(containerEl)
+      .setName('Combine all highlights into one file per book')
+      .setDesc(
+        'Creates one note per book with all highlights. Disables per-highlight notes for books in this mode.'
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.singleFilePerBook)
+          .onChange(async (value) => {
+            this.plugin.settings.singleFilePerBook = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Custom combined-file template')
+      .setDesc('Use a custom template for the combined book highlights file')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.customSingleFileTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.customSingleFileTemplate = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Combined file template path')
+      .setDesc('The template file to use. Remember to add the ".md" extension')
+      .addText((text) =>
+        text
+          .setPlaceholder('templates/book-highlights.md')
+          .setValue(this.plugin.settings.singleFileTemplatePath)
+          .onChange(async (value) => {
+            this.plugin.settings.singleFileTemplatePath = value;
             await this.plugin.saveSettings();
           })
       );
