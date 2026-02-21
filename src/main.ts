@@ -1006,23 +1006,28 @@ class KoreaderSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
+    const s = this.plugin.settings;
 
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'KOReader general settings' });
+    // ── 1. DEVICE CONNECTION ────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Device connection' });
 
     new Setting(containerEl)
       .setName('KOReader mounted path')
       .setDesc('Eg. /media/<user>/KOBOeReader')
       .addText((text) =>
         text
-          .setPlaceholder('Enter the path wher KOReader is mounted')
-          .setValue(this.plugin.settings.koreaderBasePath)
+          .setPlaceholder('Enter the path where KOReader is mounted')
+          .setValue(s.koreaderBasePath)
           .onChange(async (value) => {
-            this.plugin.settings.koreaderBasePath = value;
+            s.koreaderBasePath = value;
             await this.plugin.saveSettings();
           })
       );
+
+    // ── 2. VAULT STORAGE ────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Vault storage' });
 
     new Setting(containerEl)
       .setName('Highlights folder location')
@@ -1031,12 +1036,409 @@ class KoreaderSettingTab extends PluginSettingTab {
         new FolderSuggest(this.app, search.inputEl);
         search
           .setPlaceholder('Example: folder/subfolder')
-          .setValue(this.plugin.settings.obsidianNoteFolder)
+          .setValue(s.obsidianNoteFolder)
           .onChange(async (value) => {
-            this.plugin.settings.obsidianNoteFolder = value;
+            s.obsidianNoteFolder = value;
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName('Create a folder for each book')
+      .setDesc('All the notes from a book will be saved in a folder named after the book')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(s.aFolderForEachBook)
+          .onChange(async (value) => {
+            s.aFolderForEachBook = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Book path template')
+      .setDesc(
+        createFragment((frag) => {
+          frag.appendText(
+            'Template for the book path relative to the highlights folder. ' +
+            'Available variables: {{title}}, {{authors}}. ' +
+            '{{title}} is processed using the book title settings below. ' +
+            "E.g. {{authors}}/{{title}} groups books in per-author folders. " +
+            "Leave empty to use the 'Create a folder for each book' toggle."
+          );
+        })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('{{authors}}/{{title}}')
+          .setValue(s.bookFolderTemplate ?? '')
+          .onChange(async (value) => {
+            s.bookFolderTemplate = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    // ── 3. PER-HIGHLIGHT NOTES ──────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Per-highlight notes' });
+
+    if (!s.singleFilePerBook) {
+      let noteTemplateToggle: ToggleComponent;
+      let noteTemplateText: SearchComponent;
+
+      new Setting(containerEl)
+        .setName('Custom template')
+        .setDesc('Use a custom template for individual highlight notes')
+        .addToggle((toggle) => {
+          noteTemplateToggle = toggle;
+          return toggle
+            .setValue(s.customTemplate)
+            .onChange(async (value) => {
+              s.customTemplate = value;
+              await this.plugin.saveSettings();
+              noteTemplateText.setDisabled(!value);
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Template file')
+        .setDesc('The template file to use')
+        .addSearch((search) => {
+          noteTemplateText = search;
+          new FileSuggest(this.app, search.inputEl);
+          search
+            .setPlaceholder('templates/note.md')
+            .setValue(s.templatePath)
+            .setDisabled(!s.customTemplate)
+            .onChange(async (value) => {
+              s.templatePath = value;
+              await this.plugin.saveSettings();
+            });
+        })
+        .addButton((btn) =>
+          btn
+            .setButtonText('Export default')
+            .onClick(async () => {
+              const filePath = normalizePath(
+                `${this.getTemplateFolderPath()}/koreader-note-template.md`
+              );
+              try {
+                await this.plugin.app.vault.create(filePath, DEFAULT_NOTE_TEMPLATE);
+                s.templatePath = filePath;
+                s.customTemplate = true;
+                await this.plugin.saveSettings();
+                noteTemplateText.setValue(filePath).setDisabled(false);
+                noteTemplateToggle.setValue(true);
+                new Notice(`Template exported to ${filePath}`);
+              } catch (e) {
+                if (e.message?.includes('already exists')) {
+                  new Notice(`Template already exists at ${filePath}`);
+                } else {
+                  console.error(e);
+                  new Notice(`Failed to export template: ${e.message}`);
+                }
+              }
+            })
+        );
+
+      containerEl.createEl('h3', { text: 'Note title formatting' });
+
+      new Setting(containerEl).setName('Prefix').addText((text) =>
+        text
+          .setPlaceholder('Enter the prefix')
+          .setValue(s.noteTitleOptions.prefix)
+          .onChange(async (value) => {
+            s.noteTitleOptions.prefix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+      new Setting(containerEl).setName('Suffix').addText((text) =>
+        text
+          .setPlaceholder('Enter the suffix')
+          .setValue(s.noteTitleOptions.suffix)
+          .onChange(async (value) => {
+            s.noteTitleOptions.suffix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+      new Setting(containerEl)
+        .setName('Max words')
+        .setDesc(
+          'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
+        )
+        .addSlider((number) =>
+          number
+            .setDynamicTooltip()
+            .setLimits(0, 10, 1)
+            .setValue(s.noteTitleOptions.maxWords)
+            .onChange(async (value) => {
+              s.noteTitleOptions.maxWords = value;
+              await this.plugin.saveSettings();
+            })
+        );
+      new Setting(containerEl)
+        .setName('Max length')
+        .setDesc(
+          'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
+        )
+        .addSlider((number) =>
+          number
+            .setDynamicTooltip()
+            .setLimits(0, 50, 1)
+            .setValue(s.noteTitleOptions.maxLength)
+            .onChange(async (value) => {
+              s.noteTitleOptions.maxLength = value;
+              await this.plugin.saveSettings();
+            })
+        );
+    } else {
+      containerEl
+        .createEl('p', { cls: 'setting-item-description' })
+        .appendText(
+          'Per-highlight notes are disabled while "Combined book file" is active.'
+        );
+    }
+
+    // ── 4. COMBINED BOOK FILE ───────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Combined book file' });
+
+    new Setting(containerEl)
+      .setName('Combine all highlights into one file per book')
+      .setDesc(
+        'Creates one note per book containing all highlights. When enabled, per-highlight notes are not created.'
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(s.singleFilePerBook)
+          .onChange(async (value) => {
+            s.singleFilePerBook = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    if (s.singleFilePerBook) {
+      let singleFileTemplateToggle: ToggleComponent;
+      let singleFileTemplateText: SearchComponent;
+
+      new Setting(containerEl)
+        .setName('Custom template')
+        .setDesc('Use a custom template for the combined book highlights file')
+        .addToggle((toggle) => {
+          singleFileTemplateToggle = toggle;
+          return toggle
+            .setValue(s.customSingleFileTemplate)
+            .onChange(async (value) => {
+              s.customSingleFileTemplate = value;
+              await this.plugin.saveSettings();
+              singleFileTemplateText.setDisabled(!value);
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Template file')
+        .setDesc('The template file to use')
+        .addSearch((search) => {
+          singleFileTemplateText = search;
+          new FileSuggest(this.app, search.inputEl);
+          search
+            .setPlaceholder('templates/book-highlights.md')
+            .setValue(s.singleFileTemplatePath)
+            .setDisabled(!s.customSingleFileTemplate)
+            .onChange(async (value) => {
+              s.singleFileTemplatePath = value;
+              await this.plugin.saveSettings();
+            });
+        })
+        .addButton((btn) =>
+          btn
+            .setButtonText('Export default')
+            .onClick(async () => {
+              const filePath = normalizePath(
+                `${this.getTemplateFolderPath()}/koreader-book-highlights-template.md`
+              );
+              try {
+                await this.plugin.app.vault.create(filePath, DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE);
+                s.singleFileTemplatePath = filePath;
+                s.customSingleFileTemplate = true;
+                await this.plugin.saveSettings();
+                singleFileTemplateText.setValue(filePath).setDisabled(false);
+                singleFileTemplateToggle.setValue(true);
+                new Notice(`Template exported to ${filePath}`);
+              } catch (e) {
+                if (e.message?.includes('already exists')) {
+                  new Notice(`Template already exists at ${filePath}`);
+                } else {
+                  console.error(e);
+                  new Notice(`Failed to export template: ${e.message}`);
+                }
+              }
+            })
+        );
+    }
+
+    // ── 5. DATAVIEW SUMMARY ─────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Dataview summary' });
+
+    new Setting(containerEl)
+      .setName('Create a Dataview summary note per book')
+      .setDesc(
+        createFragment((frag) => {
+          frag.appendText(
+            'Create a note per book with a Dataview query embedding all its highlights (read the '
+          );
+          frag.createEl(
+            'a',
+            {
+              text: 'documentation',
+              href: 'https://github.com/Edo78/obsidian-koreader-sync#dateview-embedded',
+            },
+            (a) => {
+              a.setAttr('target', '_blank');
+            }
+          );
+          frag.appendText(')');
+        })
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(s.createDataviewQuery)
+          .onChange(async (value) => {
+            s.createDataviewQuery = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    if (s.createDataviewQuery) {
+      let dataviewTemplateToggle: ToggleComponent;
+      let dataviewTemplateText: SearchComponent;
+
+      new Setting(containerEl)
+        .setName('Custom template')
+        .setDesc('Use a custom template for the Dataview summary note')
+        .addToggle((toggle) => {
+          dataviewTemplateToggle = toggle;
+          return toggle
+            .setValue(s.customDataviewTemplate)
+            .onChange(async (value) => {
+              s.customDataviewTemplate = value;
+              await this.plugin.saveSettings();
+              dataviewTemplateText.setDisabled(!value);
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Template file')
+        .setDesc('The template file to use')
+        .addSearch((search) => {
+          dataviewTemplateText = search;
+          new FileSuggest(this.app, search.inputEl);
+          search
+            .setPlaceholder('templates/template-book.md')
+            .setValue(s.dataviewTemplatePath)
+            .setDisabled(!s.customDataviewTemplate)
+            .onChange(async (value) => {
+              s.dataviewTemplatePath = value;
+              await this.plugin.saveSettings();
+            });
+        })
+        .addButton((btn) =>
+          btn
+            .setButtonText('Export default')
+            .onClick(async () => {
+              const filePath = normalizePath(
+                `${this.getTemplateFolderPath()}/koreader-dataview-template.md`
+              );
+              try {
+                await this.plugin.app.vault.create(filePath, DEFAULT_DATAVIEW_TEMPLATE);
+                s.dataviewTemplatePath = filePath;
+                s.customDataviewTemplate = true;
+                await this.plugin.saveSettings();
+                dataviewTemplateText.setValue(filePath).setDisabled(false);
+                dataviewTemplateToggle.setValue(true);
+                new Notice(`Template exported to ${filePath}`);
+              } catch (e) {
+                if (e.message?.includes('already exists')) {
+                  new Notice(`Template already exists at ${filePath}`);
+                } else {
+                  console.error(e);
+                  new Notice(`Failed to export template: ${e.message}`);
+                }
+              }
+            })
+        );
+    }
+
+    // ── 6. BOOK TITLE FORMATTING ────────────────────────────────────
+    // Shown when any book-level naming is in use
+    const showBookTitles =
+      s.aFolderForEachBook ||
+      !!s.bookFolderTemplate ||
+      s.singleFilePerBook ||
+      s.createDataviewQuery;
+
+    if (showBookTitles) {
+      containerEl.createEl('h2', { text: 'Book title formatting' });
+      containerEl
+        .createEl('p', { cls: 'setting-item-description' })
+        .appendText(
+          'Applied to folder names, combined book files, and Dataview summary notes.'
+        );
+
+      new Setting(containerEl).setName('Prefix').addText((text) =>
+        text
+          .setPlaceholder('Enter the prefix')
+          .setValue(s.bookTitleOptions.prefix)
+          .onChange(async (value) => {
+            s.bookTitleOptions.prefix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+      new Setting(containerEl).setName('Suffix').addText((text) =>
+        text
+          .setPlaceholder('Enter the suffix')
+          .setValue(s.bookTitleOptions.suffix)
+          .onChange(async (value) => {
+            s.bookTitleOptions.suffix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+      new Setting(containerEl)
+        .setName('Max words')
+        .setDesc(
+          'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
+        )
+        .addSlider((number) =>
+          number
+            .setDynamicTooltip()
+            .setLimits(0, 10, 1)
+            .setValue(s.bookTitleOptions.maxWords)
+            .onChange(async (value) => {
+              s.bookTitleOptions.maxWords = value;
+              await this.plugin.saveSettings();
+            })
+        );
+      new Setting(containerEl)
+        .setName('Max length')
+        .setDesc(
+          'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
+        )
+        .addSlider((number) =>
+          number
+            .setDynamicTooltip()
+            .setLimits(0, 50, 1)
+            .setValue(s.bookTitleOptions.maxLength)
+            .onChange(async (value) => {
+              s.bookTitleOptions.maxLength = value;
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    // ── 7. SYNC BEHAVIOR ────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Sync behavior' });
 
     new Setting(containerEl)
       .setName('Keep in sync')
@@ -1058,374 +1460,15 @@ class KoreaderSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.keepInSync)
+          .setValue(s.keepInSync)
           .onChange(async (value) => {
-            this.plugin.settings.keepInSync = value;
+            s.keepInSync = value;
             await this.plugin.saveSettings();
           })
       );
 
-    new Setting(containerEl)
-      .setName('Create a folder for each book')
-      .setDesc(
-        'All the notes from a book will be saved in a folder named after the book'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.aFolderForEachBook)
-          .onChange(async (value) => {
-            this.plugin.settings.aFolderForEachBook = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Book path template')
-      .setDesc(
-        createFragment((frag) => {
-          frag.appendText(
-            'Template for the book path relative to the highlights folder. ' +
-            'Available variables: {{title}}, {{authors}}. ' +
-            '{{title}} is processed using the book title settings below. ' +
-            'E.g. {{authors}}/{{title}} groups books in per-author folders. ' +
-            'Leave empty to use the \'Create a folder for each book\' toggle.'
-          );
-        })
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('{{authors}}/{{title}}')
-          .setValue(this.plugin.settings.bookFolderTemplate ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.bookFolderTemplate = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl('h2', { text: 'View settings' });
-
-    let noteTemplateToggle: ToggleComponent;
-    let noteTemplateText: SearchComponent;
-
-    new Setting(containerEl)
-      .setName('Custom template')
-      .setDesc('Use a custom template for the notes')
-      .addToggle((toggle) => {
-        noteTemplateToggle = toggle;
-        return toggle
-          .setValue(this.plugin.settings.customTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.customTemplate = value;
-            await this.plugin.saveSettings();
-            noteTemplateText.setDisabled(!value);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Template file')
-      .setDesc('The template file to use')
-      .addSearch((search) => {
-        noteTemplateText = search;
-        new FileSuggest(this.app, search.inputEl);
-        search
-          .setPlaceholder('templates/note.md')
-          .setValue(this.plugin.settings.templatePath)
-          .setDisabled(!this.plugin.settings.customTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.templatePath = value;
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((btn) =>
-        btn
-          .setButtonText('Export default')
-          .onClick(async () => {
-            const filePath = normalizePath(
-              `${this.getTemplateFolderPath()}/koreader-note-template.md`
-            );
-            try {
-              await this.plugin.app.vault.create(filePath, DEFAULT_NOTE_TEMPLATE);
-              this.plugin.settings.templatePath = filePath;
-              this.plugin.settings.customTemplate = true;
-              await this.plugin.saveSettings();
-              noteTemplateText.setValue(filePath).setDisabled(false);
-              noteTemplateToggle.setValue(true);
-              new Notice(`Template exported to ${filePath}`);
-            } catch (e) {
-              if (e.message?.includes('already exists')) {
-                new Notice(`Template already exists at ${filePath}`);
-              } else {
-                console.error(e);
-                new Notice(`Failed to export template: ${e.message}`);
-              }
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Create a summary note per book with a dataview query')
-      .setDesc(
-        createFragment((frag) => {
-          frag.appendText(
-            'Create a note (for each book) with a dataview query (read the '
-          );
-          frag.createEl(
-            'a',
-            {
-              text: 'documentation',
-              href: 'https://github.com/Edo78/obsidian-koreader-sync#dateview-embedded',
-            },
-            (a) => {
-              a.setAttr('target', '_blank');
-            }
-          );
-          frag.appendText(')');
-        })
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.createDataviewQuery)
-          .onChange(async (value) => {
-            this.plugin.settings.createDataviewQuery = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    let dataviewTemplateToggle: ToggleComponent;
-    let dataviewTemplateText: SearchComponent;
-
-    new Setting(containerEl)
-      .setName('Custom book template')
-      .setDesc('Use a custom template for the dataview')
-      .addToggle((toggle) => {
-        dataviewTemplateToggle = toggle;
-        return toggle
-          .setValue(this.plugin.settings.customDataviewTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.customDataviewTemplate = value;
-            await this.plugin.saveSettings();
-            dataviewTemplateText.setDisabled(!value);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Book template file')
-      .setDesc('The template file to use')
-      .addSearch((search) => {
-        dataviewTemplateText = search;
-        new FileSuggest(this.app, search.inputEl);
-        search
-          .setPlaceholder('templates/template-book.md')
-          .setValue(this.plugin.settings.dataviewTemplatePath)
-          .setDisabled(!this.plugin.settings.customDataviewTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.dataviewTemplatePath = value;
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((btn) =>
-        btn
-          .setButtonText('Export default')
-          .onClick(async () => {
-            const filePath = normalizePath(
-              `${this.getTemplateFolderPath()}/koreader-dataview-template.md`
-            );
-            try {
-              await this.plugin.app.vault.create(filePath, DEFAULT_DATAVIEW_TEMPLATE);
-              this.plugin.settings.dataviewTemplatePath = filePath;
-              this.plugin.settings.customDataviewTemplate = true;
-              await this.plugin.saveSettings();
-              dataviewTemplateText.setValue(filePath).setDisabled(false);
-              dataviewTemplateToggle.setValue(true);
-              new Notice(`Template exported to ${filePath}`);
-            } catch (e) {
-              if (e.message?.includes('already exists')) {
-                new Notice(`Template already exists at ${filePath}`);
-              } else {
-                console.error(e);
-                new Notice(`Failed to export template: ${e.message}`);
-              }
-            }
-          })
-      );
-
-    containerEl.createEl('h2', { text: 'Single file per book (experimental)' });
-
-    new Setting(containerEl)
-      .setName('Combine all highlights into one file per book')
-      .setDesc(
-        'Creates one note per book with all highlights. Disables per-highlight notes for books in this mode.'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.singleFilePerBook)
-          .onChange(async (value) => {
-            this.plugin.settings.singleFilePerBook = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    let singleFileTemplateToggle: ToggleComponent;
-    let singleFileTemplateText: SearchComponent;
-
-    new Setting(containerEl)
-      .setName('Custom combined-file template')
-      .setDesc('Use a custom template for the combined book highlights file')
-      .addToggle((toggle) => {
-        singleFileTemplateToggle = toggle;
-        return toggle
-          .setValue(this.plugin.settings.customSingleFileTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.customSingleFileTemplate = value;
-            await this.plugin.saveSettings();
-            singleFileTemplateText.setDisabled(!value);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Combined file template path')
-      .setDesc('The template file to use')
-      .addSearch((search) => {
-        singleFileTemplateText = search;
-        new FileSuggest(this.app, search.inputEl);
-        search
-          .setPlaceholder('templates/book-highlights.md')
-          .setValue(this.plugin.settings.singleFileTemplatePath)
-          .setDisabled(!this.plugin.settings.customSingleFileTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.singleFileTemplatePath = value;
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((btn) =>
-        btn
-          .setButtonText('Export default')
-          .onClick(async () => {
-            const filePath = normalizePath(
-              `${this.getTemplateFolderPath()}/koreader-book-highlights-template.md`
-            );
-            try {
-              await this.plugin.app.vault.create(filePath, DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE);
-              this.plugin.settings.singleFileTemplatePath = filePath;
-              this.plugin.settings.customSingleFileTemplate = true;
-              await this.plugin.saveSettings();
-              singleFileTemplateText.setValue(filePath).setDisabled(false);
-              singleFileTemplateToggle.setValue(true);
-              new Notice(`Template exported to ${filePath}`);
-            } catch (e) {
-              if (e.message?.includes('already exists')) {
-                new Notice(`Template already exists at ${filePath}`);
-              } else {
-                console.error(e);
-                new Notice(`Failed to export template: ${e.message}`);
-              }
-            }
-          })
-      );
-
-    containerEl.createEl('h2', { text: 'Note title settings' });
-
-    new Setting(containerEl).setName('Prefix').addText((text) =>
-      text
-        .setPlaceholder('Enter the prefix')
-        .setValue(this.plugin.settings.noteTitleOptions.prefix)
-        .onChange(async (value) => {
-          this.plugin.settings.noteTitleOptions.prefix = value;
-          await this.plugin.saveSettings();
-        })
-    );
-    new Setting(containerEl).setName('Suffix').addText((text) =>
-      text
-        .setPlaceholder('Enter the suffix')
-        .setValue(this.plugin.settings.noteTitleOptions.suffix)
-        .onChange(async (value) => {
-          this.plugin.settings.noteTitleOptions.suffix = value;
-          await this.plugin.saveSettings();
-        })
-    );
-    new Setting(containerEl)
-      .setName('Max words')
-      .setDesc(
-        'If is longer than this number of words, it will be truncated and "..." will be appended before the optional suffix'
-      )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 10, 1)
-          .setValue(this.plugin.settings.noteTitleOptions.maxWords)
-          .onChange(async (value) => {
-            this.plugin.settings.noteTitleOptions.maxWords = value;
-            await this.plugin.saveSettings();
-          })
-      );
-    new Setting(containerEl)
-      .setName('Max length')
-      .setDesc(
-        'If is longer than this number of characters, it will be truncated and "..." will be appended before the optional suffix'
-      )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 50, 1)
-          .setValue(this.plugin.settings.noteTitleOptions.maxLength)
-          .onChange(async (value) => {
-            this.plugin.settings.noteTitleOptions.maxLength = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl('h2', { text: 'Book title settings' });
-
-    new Setting(containerEl).setName('Prefix').addText((text) =>
-      text
-        .setPlaceholder('Enter the prefix')
-        .setValue(this.plugin.settings.bookTitleOptions.prefix)
-        .onChange(async (value) => {
-          this.plugin.settings.bookTitleOptions.prefix = value;
-          await this.plugin.saveSettings();
-        })
-    );
-    new Setting(containerEl).setName('Suffix').addText((text) =>
-      text
-        .setPlaceholder('Enter the suffix')
-        .setValue(this.plugin.settings.bookTitleOptions.suffix)
-        .onChange(async (value) => {
-          this.plugin.settings.bookTitleOptions.suffix = value;
-          await this.plugin.saveSettings();
-        })
-    );
-    new Setting(containerEl)
-      .setName('Max words')
-      .setDesc(
-        'If is longer than this number of words, it will be truncated and "..." will be appended before the optional suffix'
-      )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 10, 1)
-          .setValue(this.plugin.settings.bookTitleOptions.maxWords)
-          .onChange(async (value) => {
-            this.plugin.settings.bookTitleOptions.maxWords = value;
-            await this.plugin.saveSettings();
-          })
-      );
-    new Setting(containerEl)
-      .setName('Max length')
-      .setDesc(
-        'If is longer than this number of characters, it will be truncated and "..." will be appended before the optional suffix'
-      )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 50, 1)
-          .setValue(this.plugin.settings.bookTitleOptions.maxLength)
-          .onChange(async (value) => {
-            this.plugin.settings.bookTitleOptions.maxLength = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl('h2', { text: 'DANGER ZONE' });
+    // ── 8. ADVANCED ─────────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Advanced' });
 
     new Setting(containerEl)
       .setName('Enable reset of imported notes')
@@ -1434,9 +1477,9 @@ class KoreaderSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.enbleResetImportedNotes)
+          .setValue(s.enbleResetImportedNotes)
           .onChange(async (value) => {
-            this.plugin.settings.enbleResetImportedNotes = value;
+            s.enbleResetImportedNotes = value;
             await this.plugin.saveSettings();
           })
       );
