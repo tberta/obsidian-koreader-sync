@@ -1083,7 +1083,13 @@ class KoreaderSettingTab extends PluginSettingTab {
     // ── 3. PER-HIGHLIGHT NOTES ──────────────────────────────────────
     containerEl.createEl('h2', { text: 'Per-highlight notes' });
 
-    if (!s.singleFilePerBook) {
+    if (s.singleFilePerBook) {
+      containerEl
+        .createEl('p', { cls: 'setting-item-description' })
+        .appendText(
+          'Per-highlight notes are disabled while "Combined book file" is active.'
+        );
+    } else {
       let noteTemplateToggle: ToggleComponent;
       let noteTemplateText: SearchComponent;
 
@@ -1141,64 +1147,58 @@ class KoreaderSettingTab extends PluginSettingTab {
               }
             })
         );
-
-      containerEl.createEl('h3', { text: 'Note title formatting' });
-
-      new Setting(containerEl).setName('Prefix').addText((text) =>
-        text
-          .setPlaceholder('Enter the prefix')
-          .setValue(s.noteTitleOptions.prefix)
-          .onChange(async (value) => {
-            s.noteTitleOptions.prefix = value;
-            await this.plugin.saveSettings();
-          })
-      );
-      new Setting(containerEl).setName('Suffix').addText((text) =>
-        text
-          .setPlaceholder('Enter the suffix')
-          .setValue(s.noteTitleOptions.suffix)
-          .onChange(async (value) => {
-            s.noteTitleOptions.suffix = value;
-            await this.plugin.saveSettings();
-          })
-      );
-      new Setting(containerEl)
-        .setName('Max words')
-        .setDesc(
-          'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
-        )
-        .addSlider((number) =>
-          number
-            .setDynamicTooltip()
-            .setLimits(0, 10, 1)
-            .setValue(s.noteTitleOptions.maxWords)
-            .onChange(async (value) => {
-              s.noteTitleOptions.maxWords = value;
-              await this.plugin.saveSettings();
-            })
-        );
-      new Setting(containerEl)
-        .setName('Max length')
-        .setDesc(
-          'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
-        )
-        .addSlider((number) =>
-          number
-            .setDynamicTooltip()
-            .setLimits(0, 50, 1)
-            .setValue(s.noteTitleOptions.maxLength)
-            .onChange(async (value) => {
-              s.noteTitleOptions.maxLength = value;
-              await this.plugin.saveSettings();
-            })
-        );
-    } else {
-      containerEl
-        .createEl('p', { cls: 'setting-item-description' })
-        .appendText(
-          'Per-highlight notes are disabled while "Combined book file" is active.'
-        );
     }
+
+    containerEl.createEl('h3', { text: 'Note title formatting' });
+
+    new Setting(containerEl).setName('Prefix').addText((text) =>
+      text
+        .setPlaceholder('Enter the prefix')
+        .setValue(s.noteTitleOptions.prefix)
+        .onChange(async (value) => {
+          s.noteTitleOptions.prefix = value;
+          await this.plugin.saveSettings();
+        })
+    );
+    new Setting(containerEl).setName('Suffix').addText((text) =>
+      text
+        .setPlaceholder('Enter the suffix')
+        .setValue(s.noteTitleOptions.suffix)
+        .onChange(async (value) => {
+          s.noteTitleOptions.suffix = value;
+          await this.plugin.saveSettings();
+        })
+    );
+    new Setting(containerEl)
+      .setName('Max words')
+      .setDesc(
+        'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
+      )
+      .addSlider((number) =>
+        number
+          .setDynamicTooltip()
+          .setLimits(0, 10, 1)
+          .setValue(s.noteTitleOptions.maxWords)
+          .onChange(async (value) => {
+            s.noteTitleOptions.maxWords = value;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(containerEl)
+      .setName('Max length')
+      .setDesc(
+        'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
+      )
+      .addSlider((number) =>
+        number
+          .setDynamicTooltip()
+          .setLimits(0, 50, 1)
+          .setValue(s.noteTitleOptions.maxLength)
+          .onChange(async (value) => {
+            s.noteTitleOptions.maxLength = value;
+            await this.plugin.saveSettings();
+          })
+      );
 
     // ── 4. COMBINED BOOK FILE ───────────────────────────────────────
     containerEl.createEl('h2', { text: 'Combined book file' });
