@@ -5,6 +5,21 @@ import finder from 'node-find-files';
 import { parse } from 'lua-json';
 import { Books } from './types';
 
+// Decode Lua \xNN hex escape sequences (e.g. \xc2\xa0 → non-breaking space).
+// luaparse does not handle \xNN escapes (a Lua 5.2+ feature), so they appear
+// as literal backslash-x sequences in the parsed output.
+function decodeLuaHexEscapes(str: string): string {
+  return str.replace(/(?:\\x[0-9a-fA-F]{2})+/g, (match) => {
+    const bytes: number[] = [];
+    const hex = /\\x([0-9a-fA-F]{2})/g;
+    let m: RegExpExecArray | null;
+    while ((m = hex.exec(match)) !== null) {
+      bytes.push(parseInt(m[1], 16));
+    }
+    return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+  });
+}
+
 export class KOReaderMetadata {
   koreaderBasePath: string;
 
@@ -28,8 +43,8 @@ export class KOReaderMetadata {
               jsonMetadata;
 
             const sdrFallback = path.basename(path.dirname(file)).replace(/\.sdr$/, '');
-            const title = doc_props?.title || sdrFallback;
-            const authors = doc_props?.authors || 'Unknown';
+            const title = decodeLuaHexEscapes(doc_props?.title || sdrFallback);
+            const authors = decodeLuaHexEscapes(doc_props?.authors || 'Unknown');
 
             if (!title) {
               // sdrFallback is always non-empty (it is the directory name), so this
@@ -51,11 +66,11 @@ export class KOReaderMetadata {
               for (const key of Object.keys(annotations)) {
                 const ann = annotations[key];
                 normalizedBookmarks[key] = {
-                  chapter: ann.chapter || '',
+                  chapter: decodeLuaHexEscapes(ann.chapter || ''),
                   // text is intentionally left empty: createNote() treats an empty
                   // text as "new format" and reads the page from bookmark.page instead.
                   text: '',
-                  notes: ann.text || '',       // highlight text lives in "text"
+                  notes: decodeLuaHexEscapes(ann.text || ''),       // highlight text lives in "text"
                   datetime: ann.datetime || '',
                   highlighted: true,
                   pos0: ann.pos0 || '',
@@ -66,7 +81,16 @@ export class KOReaderMetadata {
             }
             // Old format: highlights stored under "bookmarks".
             else if (bookmarks && Object.keys(bookmarks).length) {
-              normalizedBookmarks = bookmarks;
+              normalizedBookmarks = {};
+              for (const key of Object.keys(bookmarks)) {
+                const bm = bookmarks[key];
+                normalizedBookmarks[key] = {
+                  ...bm,
+                  chapter: decodeLuaHexEscapes(bm.chapter || ''),
+                  notes: decodeLuaHexEscapes(bm.notes || ''),
+                  text: decodeLuaHexEscapes(bm.text || ''),
+                };
+              }
             }
 
             if (normalizedBookmarks && Object.keys(normalizedBookmarks).length) {
