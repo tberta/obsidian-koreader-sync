@@ -36,7 +36,7 @@ const DEFAULT_NOTE_TEMPLATE = `## Title: [[<%= it.bookPath %>|<%= it.title %>]]
 
 Page: <%= it.page %>
 
-> <%= it.highlight %>
+> <%= it.highlight.split('\\n').join('\\n> ') %>
 
 <%= it.text %>`;
 
@@ -52,9 +52,14 @@ const DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE = `# <%= it.title %>
 
 Page: <%= b.page %>
 
-> <%= b.highlight %>
+> <%= b.highlight.split('\\n').join('\\n> ') %>
 
-<%= b.text %>
+<% if (b.text) { %>
+
+> [!note]
+> <%= b.text.split('\\n').join('\\n> ') %>
+
+<% } %>
 <% }) %>`;
 
 const DEFAULT_DATAVIEW_TEMPLATE = `# Title: <%= it.data.title %>
@@ -426,7 +431,7 @@ export default class KOReader extends Plugin {
       : (parseInt(bookmark.page) || -1);
     const noteItself = bookmark.text
       ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
-      : '';
+      : (bookmark.userNote ?? '');
     const noteTitle = noteItself
       ? this.manageTitle(noteItself, this.settings.noteTitleOptions)
       : `${this.manageTitle(
@@ -495,7 +500,7 @@ export default class KOReader extends Plugin {
           : (parseInt(bookmark.page) || -1);
         const text = bookmark.text
           ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
-          : '';
+          : (bookmark.userNote ?? '');
         return {
           chapter: bookmark.chapter ?? '',
           highlight: bookmark.notes ?? '',

@@ -3,6 +3,7 @@ export interface Bookmark {
   text: string;
   datetime: string;
   notes: string;
+  userNote?: string;
   highlighted: boolean;
   pos0: string;
   pos1: string;

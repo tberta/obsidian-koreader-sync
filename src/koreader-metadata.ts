@@ -71,6 +71,7 @@ export class KOReaderMetadata {
                   // text as "new format" and reads the page from bookmark.page instead.
                   text: '',
                   notes: decodeLuaHexEscapes(ann.text || ''),       // highlight text lives in "text"
+                  userNote: ann.note ? decodeLuaHexEscapes(ann.note) : undefined, // user-written annotation
                   datetime: ann.datetime || '',
                   highlighted: true,
                   pos0: ann.pos0 || '',
