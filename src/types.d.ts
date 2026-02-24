@@ -2,6 +2,7 @@ export interface Bookmark {
   chapter: string;
   text: string;
   datetime: string;
+  datetimeUpdated?: string;
   notes: string;
   userNote?: string;
   highlighted: boolean;
@@ -37,7 +38,7 @@ export interface FrontMatterData {
 
 export interface FrontMatterMetadata {
   body_hash: string;
-  keep_in_sync: boolean;
+  keep_in_sync?: boolean; // deprecated: moved to top-level koreader_keep_in_sync
   yet_to_be_edited: boolean;
   managed_book_title: string;
   percent_finished?: number;

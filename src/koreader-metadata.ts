@@ -73,6 +73,7 @@ export class KOReaderMetadata {
                   notes: decodeLuaHexEscapes(ann.text || ''),       // highlight text lives in "text"
                   userNote: ann.note ? decodeLuaHexEscapes(ann.note) : undefined, // user-written annotation
                   datetime: ann.datetime || '',
+                  datetimeUpdated: ann.datetime_updated || undefined,
                   highlighted: true,
                   pos0: ann.pos0 || '',
                   pos1: ann.pos1 || '',

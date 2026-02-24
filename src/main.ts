@@ -78,7 +78,7 @@ interface KOReaderSettings {
   obsidianNoteFolder: string;
   noteTitleOptions: TitleOptions;
   bookTitleOptions: TitleOptions;
-  keepInSync: boolean;
+  keepInSyncMode: 'always' | 'never' | 'unfinished';
   aFolderForEachBook: boolean;
   customTemplate: boolean;
   customDataviewTemplate: boolean;
@@ -97,7 +97,7 @@ const DEFAULT_SETTINGS: KOReaderSettings = {
   importedNotes: {},
   enbleResetImportedNotes: false,
   bookFolderTemplate: '',
-  keepInSync: false,
+  keepInSyncMode: 'never',
   aFolderForEachBook: false,
   customTemplate: false,
   customDataviewTemplate: false,
@@ -125,6 +125,26 @@ interface TitleOptions {
 }
 
 const KOREADERKEY = 'koreader-sync';
+
+// Separator between plugin-managed content and user-added notes.
+// Rendered as an invisible Obsidian comment in Live Preview.
+const KOREADER_USER_SECTION_SEPARATOR = '\n%% koreader-user-notes %%\n';
+
+function computeKeepInSync(
+  mode: KOReaderSettings['keepInSyncMode'],
+  percentFinished: number
+): boolean {
+  if (mode === 'always') return true;
+  if (mode === 'unfinished') return percentFinished < 100;
+  return false;
+}
+
+function computeBookmarkContentHash(bookmark: Bookmark): string {
+  return crypto
+    .createHash('md5')
+    .update(`${bookmark.notes}|${bookmark.userNote ?? ''}|${bookmark.chapter}`)
+    .digest('hex');
+}
 
 export default class KOReader extends Plugin {
   settings: KOReaderSettings;
@@ -291,14 +311,14 @@ export default class KOReader extends Plugin {
         editor: Editor,
         view: MarkdownView
       ) => {
-        const propertyPath = `${[KOREADERKEY]}.metadata.keep_in_sync`;
+        // Check new top-level property, fall back to old nested location
+        const val =
+          this.getFrontmatterProperty('koreader_keep_in_sync', view) ??
+          this.getFrontmatterProperty(`${KOREADERKEY}.metadata.keep_in_sync`, view);
         if (checking) {
-          if (this.getFrontmatterProperty(propertyPath, view) === false) {
-            return true;
-          }
-          return false;
+          return val === false;
         }
-        this.setFrontmatterProperty(propertyPath, true, view);
+        this.setFrontmatterProperty('koreader_keep_in_sync', true, view);
       },
     });
 
@@ -310,14 +330,13 @@ export default class KOReader extends Plugin {
         editor: Editor,
         view: MarkdownView
       ) => {
-        const propertyPath = `${[KOREADERKEY]}.metadata.keep_in_sync`;
+        const val =
+          this.getFrontmatterProperty('koreader_keep_in_sync', view) ??
+          this.getFrontmatterProperty(`${KOREADERKEY}.metadata.keep_in_sync`, view);
         if (checking) {
-          if (this.getFrontmatterProperty(propertyPath, view) === true) {
-            return true;
-          }
-          return false;
+          return val === true;
         }
-        this.setFrontmatterProperty(propertyPath, false, view);
+        this.setFrontmatterProperty('koreader_keep_in_sync', false, view);
       },
     });
 
@@ -343,7 +362,12 @@ export default class KOReader extends Plugin {
   onunload() {}
 
   async loadSettings() {
-    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
+    const loaded: any = await this.loadData();
+    this.settings = { ...DEFAULT_SETTINGS, ...loaded };
+    // Migrate old keepInSync boolean to keepInSyncMode
+    if (!loaded?.keepInSyncMode && 'keepInSync' in (loaded ?? {})) {
+      this.settings.keepInSyncMode = loaded.keepInSync ? 'always' : 'never';
+    }
   }
 
   async saveSettings() {
@@ -361,14 +385,27 @@ export default class KOReader extends Plugin {
     ) {
       return;
     }
-    const currentHash = crypto.createHash('md5').update(content).digest('hex');
+    // gray-matter includes the newline after the closing --- delimiter in `content`,
+    // but body_hash was computed from the raw template output (no leading \n).
+    // Strip it to keep hashing consistent across read-back vs. creation.
+    const normalizedContent = content.startsWith('\n') ? content.slice(1) : content;
+    // Only hash the plugin-managed section (before separator) so user additions
+    // below the separator don't falsely trigger yet_to_be_edited = false.
+    const pluginContent = normalizedContent.includes(KOREADER_USER_SECTION_SEPARATOR)
+      ? normalizedContent.split(KOREADER_USER_SECTION_SEPARATOR)[0]
+      : normalizedContent;
+    const currentHash = crypto.createHash('md5').update(pluginContent).digest('hex');
     if (currentHash === frontMatter.metadata?.body_hash) {
       return;
     }
-    // Body changed — user edited the note
-    this.setObjectProperty(data, `${KOREADERKEY}.metadata.yet_to_be_edited`, false);
-    this.setObjectProperty(data, `${KOREADERKEY}.metadata.body_hash`, currentHash);
-    await this.app.vault.modify(file, matter.stringify(content, data, {}));
+    // Body changed — user edited the note.
+    // Use processFrontMatter so only the YAML block is rewritten; the body bytes
+    // stay untouched. This avoids accumulating extra \n on every rewrite and
+    // prevents conflicts with plugins like "Update time on Edit".
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      this.setObjectProperty(fm, `${KOREADERKEY}.metadata.yet_to_be_edited`, false);
+      this.setObjectProperty(fm, `${KOREADERKEY}.metadata.body_hash`, currentHash);
+    });
   }
 
   private getObjectProperty(object: { [x: string]: any }, path: string) {
@@ -458,7 +495,10 @@ export default class KOReader extends Plugin {
       page,
     });
 
-    const pluginFrontmatter: { [key: string]: FrontMatter } = {
+    const computedKeepInSync = keepInSync ?? computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
+    const frontmatterData = {
+      koreader_keep_in_sync: computedKeepInSync,
+      ...extraFrontmatter,
       [KOREADERKEY]: {
         type: NoteType.SINGLE_NOTE,
         uniqueId,
@@ -472,15 +512,13 @@ export default class KOReader extends Plugin {
         },
         metadata: {
           body_hash: crypto.createHash('md5').update(body).digest('hex'),
-          keep_in_sync: keepInSync || this.settings.keepInSync,
           yet_to_be_edited: true,
           managed_book_title: managedBookTitle,
         },
       },
     };
-    const frontmatterData = { ...extraFrontmatter, ...pluginFrontmatter };
 
-    return { content: body, frontmatterData, notePath };
+    return { content: body + KOREADER_USER_SECTION_SEPARATOR, frontmatterData, notePath };
   }
 
   private async createBookHighlightsNote(params: {
@@ -488,9 +526,10 @@ export default class KOReader extends Plugin {
     managedBookTitle: string;
     book: Book;
     uniqueIds: string[];
+    contentHashes?: Record<string, string>;
     keepInSync?: boolean;
   }): Promise<{ content: string; frontmatterData: object; notePath: string }> {
-    const { path, managedBookTitle, book, uniqueIds, keepInSync } = params;
+    const { path, managedBookTitle, book, uniqueIds, contentHashes, keepInSync } = params;
 
     // Build sorted bookmarks array
     const bookmarks = Object.values(book.bookmarks)
@@ -526,12 +565,16 @@ export default class KOReader extends Plugin {
     });
 
     const notePath = normalizePath(`${path}/${managedBookTitle}`);
+    const bodyWithSeparator = body + KOREADER_USER_SECTION_SEPARATOR;
 
+    const computedKeepInSync = keepInSync ?? computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
     const frontmatterData = {
+      koreader_keep_in_sync: computedKeepInSync,
       ...extraFrontmatter,
       [KOREADERKEY]: {
         type: NoteType.BOOK_HIGHLIGHTS,
         uniqueIds,
+        ...(contentHashes ? { contentHashes } : {}),
         data: {
           title: book.title ?? '',
           authors: book.authors ?? '',
@@ -540,13 +583,12 @@ export default class KOReader extends Plugin {
           body_hash: crypto.createHash('md5').update(body).digest('hex'),
           percent_finished: book.percent_finished,
           managed_book_title: managedBookTitle,
-          keep_in_sync: keepInSync ?? this.settings.keepInSync,
           yet_to_be_edited: true,
         },
       },
     };
 
-    return { content: body, frontmatterData, notePath };
+    return { content: bodyWithSeparator, frontmatterData, notePath };
   }
 
   async createDataviewQueryPerBook(
@@ -558,19 +600,20 @@ export default class KOReader extends Plugin {
     updateNote?: TFile
   ) {
     const { path, book, managedBookTitle } = dataview;
-    let { keepInSync } = this.settings;
+    let keepInSync = computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
     if (updateNote) {
       const { data, content } = matter(
         await this.app.vault.read(updateNote),
         {}
       );
-      keepInSync = data[KOREADERKEY].metadata.keep_in_sync;
+      keepInSync = data.koreader_keep_in_sync ?? data[KOREADERKEY]?.metadata?.keep_in_sync ?? false;
       const yetToBeEdited = data[KOREADERKEY].metadata.yet_to_be_edited;
       if (!keepInSync || !yetToBeEdited) {
         return;
       }
     }
     const frontMatter = {
+      koreader_keep_in_sync: keepInSync,
       cssclass: NoteType.BOOK_NOTE,
       [KOREADERKEY]: {
         uniqueId: crypto
@@ -585,7 +628,6 @@ export default class KOReader extends Plugin {
         metadata: {
           percent_finished: book.percent_finished,
           managed_title: managedBookTitle,
-          keep_in_sync: keepInSync,
           yet_to_be_edited: true,
         },
       },
@@ -602,6 +644,7 @@ export default class KOReader extends Plugin {
       frontMatter[KOREADERKEY]
     );
     const mergedFrontmatter = {
+      koreader_keep_in_sync: keepInSync,
       ...extraFrontmatter,
       cssclass: NoteType.BOOK_NOTE,
       [KOREADERKEY]: frontMatter[KOREADERKEY],
@@ -632,7 +675,8 @@ export default class KOReader extends Plugin {
       const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
       if (fm?.[KOREADERKEY]?.uniqueId) {
         existingNotes[fm[KOREADERKEY].uniqueId] = {
-          keep_in_sync: fm[KOREADERKEY].metadata.keep_in_sync,
+          // Read from top-level property; fall back to old nested location for older notes
+          keep_in_sync: fm.koreader_keep_in_sync ?? fm[KOREADERKEY].metadata?.keep_in_sync ?? false,
           yet_to_be_edited: fm[KOREADERKEY].metadata.yet_to_be_edited,
           note: f,
         };
@@ -647,10 +691,14 @@ export default class KOReader extends Plugin {
         : this.settings.obsidianNoteFolder;
       await this.ensureFolder(path);
 
+      // Compute keep-in-sync value for this book based on the global mode setting
+      const bookKeepInSync = computeKeepInSync(this.settings.keepInSyncMode, data[book].percent_finished);
+
       // Single-file-per-book mode: one combined note per book
       if (this.settings.singleFilePerBook) {
         const filePath = `${path}/${managedBookTitle}.md`;
-        const uniqueIds = Object.keys(data[book].bookmarks).map((bk) =>
+        const bookmarkKeys = Object.keys(data[book].bookmarks);
+        const uniqueIds = bookmarkKeys.map((bk) =>
           crypto
             .createHash('md5')
             .update(
@@ -659,6 +707,15 @@ export default class KOReader extends Plugin {
             .digest('hex')
         );
 
+        // Build a map from uniqueId → bookmark and compute fresh content hashes
+        const bookmarkByUniqueId: Record<string, Bookmark> = {};
+        const contentHashes: Record<string, string> = {};
+        bookmarkKeys.forEach((bk, i) => {
+          const bookmark = data[book].bookmarks[bk as any];
+          bookmarkByUniqueId[uniqueIds[i]] = bookmark;
+          contentHashes[uniqueIds[i]] = computeBookmarkContentHash(bookmark);
+        });
+
         const existingFile = this.app.vault.getAbstractFileByPath(filePath) as TFile | null;
         if (!existingFile) {
           const { content, frontmatterData } = await this.createBookHighlightsNote({
@@ -666,7 +723,8 @@ export default class KOReader extends Plugin {
             managedBookTitle,
             book: data[book],
             uniqueIds,
-            keepInSync: this.settings.keepInSync,
+            contentHashes,
+            keepInSync: bookKeepInSync,
           });
           try {
             await this.app.vault.create(filePath, matter.stringify(content, frontmatterData));
@@ -675,26 +733,47 @@ export default class KOReader extends Plugin {
             new Notice(`KOReader: failed to create book highlights note "${filePath}": ${e.message}`);
           }
         } else {
-          // File exists — check if any uniqueId is new
+          // File exists — check if any uniqueId is new or any content has changed
           const raw = await this.app.vault.read(existingFile);
-          const { data: fmData } = matter(raw, {});
+          const { data: fmData, content: existingContent } = matter(raw, {});
           const existingFm = fmData[KOREADERKEY];
           if (existingFm?.type === NoteType.BOOK_HIGHLIGHTS) {
+            // Migrate older notes that predate the top-level koreader_keep_in_sync property
+            if (fmData.koreader_keep_in_sync === undefined) {
+              await this.app.fileManager.processFrontMatter(existingFile, (fm) => {
+                fm.koreader_keep_in_sync = bookKeepInSync;
+              });
+            }
             const existingIds: string[] = existingFm?.uniqueIds ?? [];
+            const existingHashes: Record<string, string> = existingFm?.contentHashes ?? {};
             const hasNew = uniqueIds.some((id) => !existingIds.includes(id));
-            if (hasNew) {
-              const keepInSync = existingFm?.metadata?.keep_in_sync ?? false;
-              const yetToBeEdited = existingFm?.metadata?.yet_to_be_edited ?? true;
-              // Re-sync only when keep_in_sync is enabled and user hasn't edited the note yet
-              if (keepInSync && yetToBeEdited) {
-                const { content, frontmatterData } = await this.createBookHighlightsNote({
+            // Only detect content changes when existingHashes is populated (migration safety)
+            const hasChanged = Object.keys(existingHashes).length > 0 &&
+              uniqueIds.some(
+                (id) => existingIds.includes(id) && contentHashes[id] !== existingHashes[id]
+              );
+            if (hasNew || hasChanged) {
+              const keepInSync = fmData.koreader_keep_in_sync ?? existingFm?.metadata?.keep_in_sync ?? false;
+              // For combined notes the separator preserves user content, so
+              // yet_to_be_edited is not a meaningful gate here — only keepInSync matters.
+              if (keepInSync) {
+                // Preserve any user text added after the separator
+                const separatorIdx = existingContent.indexOf(KOREADER_USER_SECTION_SEPARATOR);
+                const userContent = separatorIdx !== -1
+                  ? existingContent.slice(separatorIdx + KOREADER_USER_SECTION_SEPARATOR.length)
+                  : '';
+                const { content: newContent, frontmatterData } = await this.createBookHighlightsNote({
                   path,
                   managedBookTitle,
                   book: data[book],
                   uniqueIds,
+                  contentHashes,
                   keepInSync,
                 });
-                await this.app.vault.modify(existingFile, matter.stringify(content, frontmatterData));
+                const finalContent = userContent
+                  ? newContent + userContent
+                  : newContent;
+                await this.app.vault.modify(existingFile, matter.stringify(finalContent, frontmatterData));
               }
             }
           }
@@ -740,7 +819,7 @@ export default class KOReader extends Plugin {
                 bookmark: data[book].bookmarks[bookmark],
                 managedBookTitle,
                 book: data[book],
-                keepInSync: this.settings.keepInSync,
+                keepInSync: bookKeepInSync,
               });
 
             // If a file already exists at this path (stale import or title
@@ -1497,7 +1576,11 @@ class KoreaderSettingTab extends PluginSettingTab {
       .setName('Keep in sync')
       .setDesc(
         createFragment((frag) => {
-          frag.appendText('Keep notes in sync with KOReader (read the ');
+          frag.appendText(
+            'When to keep notes in sync with KOReader. ' +
+            'The value is written as koreader_keep_in_sync in each note\'s frontmatter ' +
+            'and can be overridden per note. (read the '
+          );
           frag.createEl(
             'a',
             {
@@ -1511,11 +1594,14 @@ class KoreaderSettingTab extends PluginSettingTab {
           frag.appendText(')');
         })
       )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(s.keepInSync)
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('never', 'Never')
+          .addOption('always', 'Always')
+          .addOption('unfinished', 'Active books only (less than 100% read)')
+          .setValue(s.keepInSyncMode ?? 'never')
           .onChange(async (value) => {
-            s.keepInSync = value;
+            s.keepInSyncMode = value as KOReaderSettings['keepInSyncMode'];
             await this.plugin.saveSettings();
           })
       );
