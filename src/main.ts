@@ -36,7 +36,7 @@ const DEFAULT_NOTE_TEMPLATE = `## Title: [[<%= it.bookPath %>|<%= it.title %>]]
 
 Page: <%= it.page %>
 
-> <%= it.highlight %>
+> <%= it.highlight.split('\\n').join('\\n> ') %>
 
 <%= it.text %>`;
 
@@ -52,9 +52,14 @@ const DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE = `# <%= it.title %>
 
 Page: <%= b.page %>
 
-> <%= b.highlight %>
+> <%= b.highlight.split('\\n').join('\\n> ') %>
 
-<%= b.text %>
+<% if (b.text) { %>
+
+> [!note]
+> <%= b.text.split('\\n').join('\\n> ') %>
+
+<% } %>
 <% }) %>`;
 
 const DEFAULT_DATAVIEW_TEMPLATE = `# Title: <%= it.data.title %>
@@ -73,7 +78,7 @@ interface KOReaderSettings {
   obsidianNoteFolder: string;
   noteTitleOptions: TitleOptions;
   bookTitleOptions: TitleOptions;
-  keepInSync: boolean;
+  keepInSyncMode: 'always' | 'never' | 'unfinished';
   aFolderForEachBook: boolean;
   customTemplate: boolean;
   customDataviewTemplate: boolean;
@@ -92,7 +97,7 @@ const DEFAULT_SETTINGS: KOReaderSettings = {
   importedNotes: {},
   enbleResetImportedNotes: false,
   bookFolderTemplate: '',
-  keepInSync: false,
+  keepInSyncMode: 'never',
   aFolderForEachBook: false,
   customTemplate: false,
   customDataviewTemplate: false,
@@ -120,6 +125,26 @@ interface TitleOptions {
 }
 
 const KOREADERKEY = 'koreader-sync';
+
+// Separator between plugin-managed content and user-added notes.
+// Rendered as an invisible Obsidian comment in Live Preview.
+const KOREADER_USER_SECTION_SEPARATOR = '\n%% koreader-user-notes %%\n';
+
+function computeKeepInSync(
+  mode: KOReaderSettings['keepInSyncMode'],
+  percentFinished: number
+): boolean {
+  if (mode === 'always') return true;
+  if (mode === 'unfinished') return percentFinished < 100;
+  return false;
+}
+
+function computeBookmarkContentHash(bookmark: Bookmark): string {
+  return crypto
+    .createHash('md5')
+    .update(`${bookmark.notes}|${bookmark.userNote ?? ''}|${bookmark.chapter}`)
+    .digest('hex');
+}
 
 export default class KOReader extends Plugin {
   settings: KOReaderSettings;
@@ -286,14 +311,14 @@ export default class KOReader extends Plugin {
         editor: Editor,
         view: MarkdownView
       ) => {
-        const propertyPath = `${[KOREADERKEY]}.metadata.keep_in_sync`;
+        // Check new top-level property, fall back to old nested location
+        const val =
+          this.getFrontmatterProperty('koreader_keep_in_sync', view) ??
+          this.getFrontmatterProperty(`${KOREADERKEY}.metadata.keep_in_sync`, view);
         if (checking) {
-          if (this.getFrontmatterProperty(propertyPath, view) === false) {
-            return true;
-          }
-          return false;
+          return val === false;
         }
-        this.setFrontmatterProperty(propertyPath, true, view);
+        this.setFrontmatterProperty('koreader_keep_in_sync', true, view);
       },
     });
 
@@ -305,14 +330,13 @@ export default class KOReader extends Plugin {
         editor: Editor,
         view: MarkdownView
       ) => {
-        const propertyPath = `${[KOREADERKEY]}.metadata.keep_in_sync`;
+        const val =
+          this.getFrontmatterProperty('koreader_keep_in_sync', view) ??
+          this.getFrontmatterProperty(`${KOREADERKEY}.metadata.keep_in_sync`, view);
         if (checking) {
-          if (this.getFrontmatterProperty(propertyPath, view) === true) {
-            return true;
-          }
-          return false;
+          return val === true;
         }
-        this.setFrontmatterProperty(propertyPath, false, view);
+        this.setFrontmatterProperty('koreader_keep_in_sync', false, view);
       },
     });
 
@@ -338,7 +362,12 @@ export default class KOReader extends Plugin {
   onunload() {}
 
   async loadSettings() {
-    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
+    const loaded: any = await this.loadData();
+    this.settings = { ...DEFAULT_SETTINGS, ...loaded };
+    // Migrate old keepInSync boolean to keepInSyncMode
+    if (!loaded?.keepInSyncMode && 'keepInSync' in (loaded ?? {})) {
+      this.settings.keepInSyncMode = loaded.keepInSync ? 'always' : 'never';
+    }
   }
 
   async saveSettings() {
@@ -356,14 +385,27 @@ export default class KOReader extends Plugin {
     ) {
       return;
     }
-    const currentHash = crypto.createHash('md5').update(content).digest('hex');
+    // gray-matter includes the newline after the closing --- delimiter in `content`,
+    // but body_hash was computed from the raw template output (no leading \n).
+    // Strip it to keep hashing consistent across read-back vs. creation.
+    const normalizedContent = content.startsWith('\n') ? content.slice(1) : content;
+    // Only hash the plugin-managed section (before separator) so user additions
+    // below the separator don't falsely trigger yet_to_be_edited = false.
+    const pluginContent = normalizedContent.includes(KOREADER_USER_SECTION_SEPARATOR)
+      ? normalizedContent.split(KOREADER_USER_SECTION_SEPARATOR)[0]
+      : normalizedContent;
+    const currentHash = crypto.createHash('md5').update(pluginContent).digest('hex');
     if (currentHash === frontMatter.metadata?.body_hash) {
       return;
     }
-    // Body changed — user edited the note
-    this.setObjectProperty(data, `${KOREADERKEY}.metadata.yet_to_be_edited`, false);
-    this.setObjectProperty(data, `${KOREADERKEY}.metadata.body_hash`, currentHash);
-    await this.app.vault.modify(file, matter.stringify(content, data, {}));
+    // Body changed — user edited the note.
+    // Use processFrontMatter so only the YAML block is rewritten; the body bytes
+    // stay untouched. This avoids accumulating extra \n on every rewrite and
+    // prevents conflicts with plugins like "Update time on Edit".
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      this.setObjectProperty(fm, `${KOREADERKEY}.metadata.yet_to_be_edited`, false);
+      this.setObjectProperty(fm, `${KOREADERKEY}.metadata.body_hash`, currentHash);
+    });
   }
 
   private getObjectProperty(object: { [x: string]: any }, path: string) {
@@ -426,7 +468,7 @@ export default class KOReader extends Plugin {
       : (parseInt(bookmark.page) || -1);
     const noteItself = bookmark.text
       ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
-      : '';
+      : (bookmark.userNote ?? '');
     const noteTitle = noteItself
       ? this.manageTitle(noteItself, this.settings.noteTitleOptions)
       : `${this.manageTitle(
@@ -453,7 +495,10 @@ export default class KOReader extends Plugin {
       page,
     });
 
-    const pluginFrontmatter: { [key: string]: FrontMatter } = {
+    const computedKeepInSync = keepInSync ?? computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
+    const frontmatterData = {
+      koreader_keep_in_sync: computedKeepInSync,
+      ...extraFrontmatter,
       [KOREADERKEY]: {
         type: NoteType.SINGLE_NOTE,
         uniqueId,
@@ -467,15 +512,13 @@ export default class KOReader extends Plugin {
         },
         metadata: {
           body_hash: crypto.createHash('md5').update(body).digest('hex'),
-          keep_in_sync: keepInSync || this.settings.keepInSync,
           yet_to_be_edited: true,
           managed_book_title: managedBookTitle,
         },
       },
     };
-    const frontmatterData = { ...extraFrontmatter, ...pluginFrontmatter };
 
-    return { content: body, frontmatterData, notePath };
+    return { content: body + KOREADER_USER_SECTION_SEPARATOR, frontmatterData, notePath };
   }
 
   private async createBookHighlightsNote(params: {
@@ -483,9 +526,10 @@ export default class KOReader extends Plugin {
     managedBookTitle: string;
     book: Book;
     uniqueIds: string[];
+    contentHashes?: Record<string, string>;
     keepInSync?: boolean;
   }): Promise<{ content: string; frontmatterData: object; notePath: string }> {
-    const { path, managedBookTitle, book, uniqueIds, keepInSync } = params;
+    const { path, managedBookTitle, book, uniqueIds, contentHashes, keepInSync } = params;
 
     // Build sorted bookmarks array
     const bookmarks = Object.values(book.bookmarks)
@@ -495,7 +539,7 @@ export default class KOReader extends Plugin {
           : (parseInt(bookmark.page) || -1);
         const text = bookmark.text
           ? (bookmark.text.split(bookmark.datetime)[1] || '').replace(/^\s+|\s+$/g, '')
-          : '';
+          : (bookmark.userNote ?? '');
         return {
           chapter: bookmark.chapter ?? '',
           highlight: bookmark.notes ?? '',
@@ -521,12 +565,16 @@ export default class KOReader extends Plugin {
     });
 
     const notePath = normalizePath(`${path}/${managedBookTitle}`);
+    const bodyWithSeparator = body + KOREADER_USER_SECTION_SEPARATOR;
 
+    const computedKeepInSync = keepInSync ?? computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
     const frontmatterData = {
+      koreader_keep_in_sync: computedKeepInSync,
       ...extraFrontmatter,
       [KOREADERKEY]: {
         type: NoteType.BOOK_HIGHLIGHTS,
         uniqueIds,
+        ...(contentHashes ? { contentHashes } : {}),
         data: {
           title: book.title ?? '',
           authors: book.authors ?? '',
@@ -535,13 +583,12 @@ export default class KOReader extends Plugin {
           body_hash: crypto.createHash('md5').update(body).digest('hex'),
           percent_finished: book.percent_finished,
           managed_book_title: managedBookTitle,
-          keep_in_sync: keepInSync ?? this.settings.keepInSync,
           yet_to_be_edited: true,
         },
       },
     };
 
-    return { content: body, frontmatterData, notePath };
+    return { content: bodyWithSeparator, frontmatterData, notePath };
   }
 
   async createDataviewQueryPerBook(
@@ -553,19 +600,20 @@ export default class KOReader extends Plugin {
     updateNote?: TFile
   ) {
     const { path, book, managedBookTitle } = dataview;
-    let { keepInSync } = this.settings;
+    let keepInSync = computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
     if (updateNote) {
       const { data, content } = matter(
         await this.app.vault.read(updateNote),
         {}
       );
-      keepInSync = data[KOREADERKEY].metadata.keep_in_sync;
+      keepInSync = data.koreader_keep_in_sync ?? data[KOREADERKEY]?.metadata?.keep_in_sync ?? false;
       const yetToBeEdited = data[KOREADERKEY].metadata.yet_to_be_edited;
       if (!keepInSync || !yetToBeEdited) {
         return;
       }
     }
     const frontMatter = {
+      koreader_keep_in_sync: keepInSync,
       cssclass: NoteType.BOOK_NOTE,
       [KOREADERKEY]: {
         uniqueId: crypto
@@ -580,7 +628,6 @@ export default class KOReader extends Plugin {
         metadata: {
           percent_finished: book.percent_finished,
           managed_title: managedBookTitle,
-          keep_in_sync: keepInSync,
           yet_to_be_edited: true,
         },
       },
@@ -597,6 +644,7 @@ export default class KOReader extends Plugin {
       frontMatter[KOREADERKEY]
     );
     const mergedFrontmatter = {
+      koreader_keep_in_sync: keepInSync,
       ...extraFrontmatter,
       cssclass: NoteType.BOOK_NOTE,
       [KOREADERKEY]: frontMatter[KOREADERKEY],
@@ -627,7 +675,8 @@ export default class KOReader extends Plugin {
       const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
       if (fm?.[KOREADERKEY]?.uniqueId) {
         existingNotes[fm[KOREADERKEY].uniqueId] = {
-          keep_in_sync: fm[KOREADERKEY].metadata.keep_in_sync,
+          // Read from top-level property; fall back to old nested location for older notes
+          keep_in_sync: fm.koreader_keep_in_sync ?? fm[KOREADERKEY].metadata?.keep_in_sync ?? false,
           yet_to_be_edited: fm[KOREADERKEY].metadata.yet_to_be_edited,
           note: f,
         };
@@ -642,10 +691,14 @@ export default class KOReader extends Plugin {
         : this.settings.obsidianNoteFolder;
       await this.ensureFolder(path);
 
+      // Compute keep-in-sync value for this book based on the global mode setting
+      const bookKeepInSync = computeKeepInSync(this.settings.keepInSyncMode, data[book].percent_finished);
+
       // Single-file-per-book mode: one combined note per book
       if (this.settings.singleFilePerBook) {
         const filePath = `${path}/${managedBookTitle}.md`;
-        const uniqueIds = Object.keys(data[book].bookmarks).map((bk) =>
+        const bookmarkKeys = Object.keys(data[book].bookmarks);
+        const uniqueIds = bookmarkKeys.map((bk) =>
           crypto
             .createHash('md5')
             .update(
@@ -654,6 +707,15 @@ export default class KOReader extends Plugin {
             .digest('hex')
         );
 
+        // Build a map from uniqueId → bookmark and compute fresh content hashes
+        const bookmarkByUniqueId: Record<string, Bookmark> = {};
+        const contentHashes: Record<string, string> = {};
+        bookmarkKeys.forEach((bk, i) => {
+          const bookmark = data[book].bookmarks[bk as any];
+          bookmarkByUniqueId[uniqueIds[i]] = bookmark;
+          contentHashes[uniqueIds[i]] = computeBookmarkContentHash(bookmark);
+        });
+
         const existingFile = this.app.vault.getAbstractFileByPath(filePath) as TFile | null;
         if (!existingFile) {
           const { content, frontmatterData } = await this.createBookHighlightsNote({
@@ -661,7 +723,8 @@ export default class KOReader extends Plugin {
             managedBookTitle,
             book: data[book],
             uniqueIds,
-            keepInSync: this.settings.keepInSync,
+            contentHashes,
+            keepInSync: bookKeepInSync,
           });
           try {
             await this.app.vault.create(filePath, matter.stringify(content, frontmatterData));
@@ -670,26 +733,47 @@ export default class KOReader extends Plugin {
             new Notice(`KOReader: failed to create book highlights note "${filePath}": ${e.message}`);
           }
         } else {
-          // File exists — check if any uniqueId is new
+          // File exists — check if any uniqueId is new or any content has changed
           const raw = await this.app.vault.read(existingFile);
-          const { data: fmData } = matter(raw, {});
+          const { data: fmData, content: existingContent } = matter(raw, {});
           const existingFm = fmData[KOREADERKEY];
           if (existingFm?.type === NoteType.BOOK_HIGHLIGHTS) {
+            // Migrate older notes that predate the top-level koreader_keep_in_sync property
+            if (fmData.koreader_keep_in_sync === undefined) {
+              await this.app.fileManager.processFrontMatter(existingFile, (fm) => {
+                fm.koreader_keep_in_sync = bookKeepInSync;
+              });
+            }
             const existingIds: string[] = existingFm?.uniqueIds ?? [];
+            const existingHashes: Record<string, string> = existingFm?.contentHashes ?? {};
             const hasNew = uniqueIds.some((id) => !existingIds.includes(id));
-            if (hasNew) {
-              const keepInSync = existingFm?.metadata?.keep_in_sync ?? false;
-              const yetToBeEdited = existingFm?.metadata?.yet_to_be_edited ?? true;
-              // Re-sync only when keep_in_sync is enabled and user hasn't edited the note yet
-              if (keepInSync && yetToBeEdited) {
-                const { content, frontmatterData } = await this.createBookHighlightsNote({
+            // Only detect content changes when existingHashes is populated (migration safety)
+            const hasChanged = Object.keys(existingHashes).length > 0 &&
+              uniqueIds.some(
+                (id) => existingIds.includes(id) && contentHashes[id] !== existingHashes[id]
+              );
+            if (hasNew || hasChanged) {
+              const keepInSync = fmData.koreader_keep_in_sync ?? existingFm?.metadata?.keep_in_sync ?? false;
+              // For combined notes the separator preserves user content, so
+              // yet_to_be_edited is not a meaningful gate here — only keepInSync matters.
+              if (keepInSync) {
+                // Preserve any user text added after the separator
+                const separatorIdx = existingContent.indexOf(KOREADER_USER_SECTION_SEPARATOR);
+                const userContent = separatorIdx !== -1
+                  ? existingContent.slice(separatorIdx + KOREADER_USER_SECTION_SEPARATOR.length)
+                  : '';
+                const { content: newContent, frontmatterData } = await this.createBookHighlightsNote({
                   path,
                   managedBookTitle,
                   book: data[book],
                   uniqueIds,
+                  contentHashes,
                   keepInSync,
                 });
-                await this.app.vault.modify(existingFile, matter.stringify(content, frontmatterData));
+                const finalContent = userContent
+                  ? newContent + userContent
+                  : newContent;
+                await this.app.vault.modify(existingFile, matter.stringify(finalContent, frontmatterData));
               }
             }
           }
@@ -735,7 +819,7 @@ export default class KOReader extends Plugin {
                 bookmark: data[book].bookmarks[bookmark],
                 managedBookTitle,
                 book: data[book],
-                keepInSync: this.settings.keepInSync,
+                keepInSync: bookKeepInSync,
               });
 
             // If a file already exists at this path (stale import or title
@@ -1006,23 +1090,39 @@ class KoreaderSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
+    const s = this.plugin.settings;
 
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'KOReader general settings' });
+    // Visibility helpers — assigned after their sections are built, called from
+    // onChange handlers further down. Closures capture variables by reference so
+    // assigning the real functions before any user interaction is sufficient.
+    let updatePerHighlightVisibility: () => void = () => {};
+    let updateSingleFileVisibility: () => void = () => {};
+    let updateDataviewVisibility: () => void = () => {};
+    let updateBookTitlesVisibility: () => void = () => {};
+
+    const showBookTitles = () =>
+      s.aFolderForEachBook || !!s.bookFolderTemplate || s.singleFilePerBook || s.createDataviewQuery;
+
+    // ── 1. DEVICE CONNECTION ────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Device connection' });
 
     new Setting(containerEl)
       .setName('KOReader mounted path')
       .setDesc('Eg. /media/<user>/KOBOeReader')
       .addText((text) =>
         text
-          .setPlaceholder('Enter the path wher KOReader is mounted')
-          .setValue(this.plugin.settings.koreaderBasePath)
+          .setPlaceholder('Enter the path where KOReader is mounted')
+          .setValue(s.koreaderBasePath)
           .onChange(async (value) => {
-            this.plugin.settings.koreaderBasePath = value;
+            s.koreaderBasePath = value;
             await this.plugin.saveSettings();
           })
       );
+
+    // ── 2. VAULT STORAGE ────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Vault storage' });
 
     new Setting(containerEl)
       .setName('Highlights folder location')
@@ -1031,143 +1131,102 @@ class KoreaderSettingTab extends PluginSettingTab {
         new FolderSuggest(this.app, search.inputEl);
         search
           .setPlaceholder('Example: folder/subfolder')
-          .setValue(this.plugin.settings.obsidianNoteFolder)
+          .setValue(s.obsidianNoteFolder)
           .onChange(async (value) => {
-            this.plugin.settings.obsidianNoteFolder = value;
+            s.obsidianNoteFolder = value;
             await this.plugin.saveSettings();
           });
       });
 
+    const deriveBookOrgMode = (): string => {
+      if (s.bookFolderTemplate?.trim()) return 'custom';
+      if (s.aFolderForEachBook) return 'per-book';
+      return 'none';
+    };
+
+    // Track the dropdown's selected value directly so visibility is not
+    // re-derived from settings (template is empty while 'custom' is selected).
+    let selectedBookOrgMode = deriveBookOrgMode();
+
+    let updateBookTemplateVisibility: () => void = () => {};
+
     new Setting(containerEl)
-      .setName('Keep in sync')
-      .setDesc(
-        createFragment((frag) => {
-          frag.appendText('Keep notes in sync with KOReader (read the ');
-          frag.createEl(
-            'a',
-            {
-              text: 'documentation',
-              href: 'https://github.com/Edo78/obsidian-koreader-sync#sync',
-            },
-            (a) => {
-              a.setAttr('target', '_blank');
+      .setName('Book organisation')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('none', 'No subfolder')
+          .addOption('per-book', 'Folder per book')
+          .addOption('custom', 'Custom path template')
+          .setValue(selectedBookOrgMode)
+          .onChange(async (value) => {
+            selectedBookOrgMode = value;
+            if (value === 'none') {
+              s.aFolderForEachBook = false;
+              s.bookFolderTemplate = '';
+            } else if (value === 'per-book') {
+              s.aFolderForEachBook = true;
+              s.bookFolderTemplate = '';
             }
-          );
-          frag.appendText(')');
-        })
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.keepInSync)
-          .onChange(async (value) => {
-            this.plugin.settings.keepInSync = value;
+            // 'custom': leave existing values, just reveal the input
             await this.plugin.saveSettings();
+            updateBookTemplateVisibility();
+            updateBookTitlesVisibility();
           })
       );
 
-    new Setting(containerEl)
-      .setName('Create a folder for each book')
-      .setDesc(
-        'All the notes from a book will be saved in a folder named after the book'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.aFolderForEachBook)
-          .onChange(async (value) => {
-            this.plugin.settings.aFolderForEachBook = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
+    const bookTemplateSetting = new Setting(containerEl)
       .setName('Book path template')
-      .setDesc(
-        createFragment((frag) => {
-          frag.appendText(
-            'Template for the book path relative to the highlights folder. ' +
-            'Available variables: {{title}}, {{authors}}. ' +
-            '{{title}} is processed using the book title settings below. ' +
-            'E.g. {{authors}}/{{title}} groups books in per-author folders. ' +
-            'Leave empty to use the \'Create a folder for each book\' toggle.'
-          );
-        })
-      )
+      .setDesc('Available variables: {{title}}, {{authors}}. {{title}} uses book title formatting below. E.g. {{authors}}/{{title}} groups books in per-author subfolders.')
       .addText((text) =>
         text
           .setPlaceholder('{{authors}}/{{title}}')
-          .setValue(this.plugin.settings.bookFolderTemplate ?? '')
+          .setValue(s.bookFolderTemplate ?? '')
           .onChange(async (value) => {
-            this.plugin.settings.bookFolderTemplate = value;
+            s.bookFolderTemplate = value;
             await this.plugin.saveSettings();
+            updateBookTitlesVisibility();
           })
       );
 
-    containerEl.createEl('h2', { text: 'View settings' });
+    updateBookTemplateVisibility = () => {
+      bookTemplateSetting.settingEl.style.display = selectedBookOrgMode === 'custom' ? '' : 'none';
+    };
+    updateBookTemplateVisibility();
 
-    let noteTemplateToggle: ToggleComponent;
-    let noteTemplateText: SearchComponent;
-
-    new Setting(containerEl)
-      .setName('Custom template')
-      .setDesc('Use a custom template for the notes')
-      .addToggle((toggle) => {
-        noteTemplateToggle = toggle;
-        return toggle
-          .setValue(this.plugin.settings.customTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.customTemplate = value;
-            await this.plugin.saveSettings();
-            noteTemplateText.setDisabled(!value);
-          });
-      });
+    // ── 3. NOTE CREATION MODE ───────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Note creation mode' });
 
     new Setting(containerEl)
-      .setName('Template file')
-      .setDesc('The template file to use')
-      .addSearch((search) => {
-        noteTemplateText = search;
-        new FileSuggest(this.app, search.inputEl);
-        search
-          .setPlaceholder('templates/note.md')
-          .setValue(this.plugin.settings.templatePath)
-          .setDisabled(!this.plugin.settings.customTemplate)
+      .setName('Note format')
+      .setDesc('Choose how highlights are saved to your vault')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('per-highlight', 'Per-highlight notes')
+          .addOption('combined', 'Combined book file')
+          .setValue(s.singleFilePerBook ? 'combined' : 'per-highlight')
           .onChange(async (value) => {
-            this.plugin.settings.templatePath = value;
+            s.singleFilePerBook = value === 'combined';
             await this.plugin.saveSettings();
-          });
-      })
-      .addButton((btn) =>
-        btn
-          .setButtonText('Export default')
-          .onClick(async () => {
-            const filePath = normalizePath(
-              `${this.getTemplateFolderPath()}/koreader-note-template.md`
-            );
-            try {
-              await this.plugin.app.vault.create(filePath, DEFAULT_NOTE_TEMPLATE);
-              this.plugin.settings.templatePath = filePath;
-              this.plugin.settings.customTemplate = true;
-              await this.plugin.saveSettings();
-              noteTemplateText.setValue(filePath).setDisabled(false);
-              noteTemplateToggle.setValue(true);
-              new Notice(`Template exported to ${filePath}`);
-            } catch (e) {
-              if (e.message?.includes('already exists')) {
-                new Notice(`Template already exists at ${filePath}`);
-              } else {
-                console.error(e);
-                new Notice(`Failed to export template: ${e.message}`);
-              }
-            }
+            updatePerHighlightVisibility();
+            updateSingleFileVisibility();
+            updateDataviewVisibility();
+            updateBookTitlesVisibility();
           })
       );
 
-    new Setting(containerEl)
-      .setName('Create a summary note per book with a dataview query')
+    // ── 4. PER-HIGHLIGHT NOTES SETTINGS ─────────────────────────────
+    // Entire section (including heading) hides when combined mode is active.
+    const perHighlightSection = containerEl.createDiv();
+
+    perHighlightSection.createEl('h2', { text: 'Per-highlight notes' });
+
+    // Dataview: sub-option of per-highlight mode only
+    new Setting(perHighlightSection)
+      .setName('Dataview summary note per book')
       .setDesc(
         createFragment((frag) => {
           frag.appendText(
-            'Create a note (for each book) with a dataview query (read the '
+            'Also create a note per book with a Dataview query embedding all its highlights (read the '
           );
           frag.createEl(
             'a',
@@ -1184,42 +1243,44 @@ class KoreaderSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.createDataviewQuery)
+          .setValue(s.createDataviewQuery)
           .onChange(async (value) => {
-            this.plugin.settings.createDataviewQuery = value;
+            s.createDataviewQuery = value;
             await this.plugin.saveSettings();
+            updateDataviewVisibility();
+            updateBookTitlesVisibility();
           })
       );
 
-    let dataviewTemplateToggle: ToggleComponent;
-    let dataviewTemplateText: SearchComponent;
+    let noteTemplateToggle: ToggleComponent;
+    let noteTemplateText: SearchComponent;
 
-    new Setting(containerEl)
-      .setName('Custom book template')
-      .setDesc('Use a custom template for the dataview')
+    new Setting(perHighlightSection)
+      .setName('Custom template')
+      .setDesc('Use a custom template for individual highlight notes')
       .addToggle((toggle) => {
-        dataviewTemplateToggle = toggle;
+        noteTemplateToggle = toggle;
         return toggle
-          .setValue(this.plugin.settings.customDataviewTemplate)
+          .setValue(s.customTemplate)
           .onChange(async (value) => {
-            this.plugin.settings.customDataviewTemplate = value;
+            s.customTemplate = value;
             await this.plugin.saveSettings();
-            dataviewTemplateText.setDisabled(!value);
+            noteTemplateText.setDisabled(!value);
           });
       });
 
-    new Setting(containerEl)
-      .setName('Book template file')
+    new Setting(perHighlightSection)
+      .setName('Template file')
       .setDesc('The template file to use')
       .addSearch((search) => {
-        dataviewTemplateText = search;
+        noteTemplateText = search;
         new FileSuggest(this.app, search.inputEl);
         search
-          .setPlaceholder('templates/template-book.md')
-          .setValue(this.plugin.settings.dataviewTemplatePath)
-          .setDisabled(!this.plugin.settings.customDataviewTemplate)
+          .setPlaceholder('templates/note.md')
+          .setValue(s.templatePath)
+          .setDisabled(!s.customTemplate)
           .onChange(async (value) => {
-            this.plugin.settings.dataviewTemplatePath = value;
+            s.templatePath = value;
             await this.plugin.saveSettings();
           });
       })
@@ -1228,15 +1289,15 @@ class KoreaderSettingTab extends PluginSettingTab {
           .setButtonText('Export default')
           .onClick(async () => {
             const filePath = normalizePath(
-              `${this.getTemplateFolderPath()}/koreader-dataview-template.md`
+              `${this.getTemplateFolderPath()}/koreader-note-template.md`
             );
             try {
-              await this.plugin.app.vault.create(filePath, DEFAULT_DATAVIEW_TEMPLATE);
-              this.plugin.settings.dataviewTemplatePath = filePath;
-              this.plugin.settings.customDataviewTemplate = true;
+              await this.plugin.app.vault.create(filePath, DEFAULT_NOTE_TEMPLATE);
+              s.templatePath = filePath;
+              s.customTemplate = true;
               await this.plugin.saveSettings();
-              dataviewTemplateText.setValue(filePath).setDisabled(false);
-              dataviewTemplateToggle.setValue(true);
+              noteTemplateText.setValue(filePath).setDisabled(false);
+              noteTemplateToggle.setValue(true);
               new Notice(`Template exported to ${filePath}`);
             } catch (e) {
               if (e.message?.includes('already exists')) {
@@ -1249,51 +1310,97 @@ class KoreaderSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl('h2', { text: 'Single file per book (experimental)' });
+    perHighlightSection.createEl('h3', { text: 'Note title formatting' });
 
-    new Setting(containerEl)
-      .setName('Combine all highlights into one file per book')
+    new Setting(perHighlightSection).setName('Prefix').addText((text) =>
+      text
+        .setPlaceholder('Enter the prefix')
+        .setValue(s.noteTitleOptions.prefix)
+        .onChange(async (value) => {
+          s.noteTitleOptions.prefix = value;
+          await this.plugin.saveSettings();
+        })
+    );
+    new Setting(perHighlightSection).setName('Suffix').addText((text) =>
+      text
+        .setPlaceholder('Enter the suffix')
+        .setValue(s.noteTitleOptions.suffix)
+        .onChange(async (value) => {
+          s.noteTitleOptions.suffix = value;
+          await this.plugin.saveSettings();
+        })
+    );
+    new Setting(perHighlightSection)
+      .setName('Max words')
       .setDesc(
-        'Creates one note per book with all highlights. Disables per-highlight notes for books in this mode.'
+        'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
       )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.singleFilePerBook)
+      .addSlider((number) =>
+        number
+          .setDynamicTooltip()
+          .setLimits(0, 10, 1)
+          .setValue(s.noteTitleOptions.maxWords)
           .onChange(async (value) => {
-            this.plugin.settings.singleFilePerBook = value;
+            s.noteTitleOptions.maxWords = value;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(perHighlightSection)
+      .setName('Max length')
+      .setDesc(
+        'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
+      )
+      .addSlider((number) =>
+        number
+          .setDynamicTooltip()
+          .setLimits(0, 50, 1)
+          .setValue(s.noteTitleOptions.maxLength)
+          .onChange(async (value) => {
+            s.noteTitleOptions.maxLength = value;
             await this.plugin.saveSettings();
           })
       );
 
+    updatePerHighlightVisibility = () => {
+      perHighlightSection.style.display = s.singleFilePerBook ? 'none' : '';
+    };
+    updatePerHighlightVisibility();
+
+    // ── 5. COMBINED BOOK FILE SETTINGS ──────────────────────────────
+    // Entire section (including heading) hides when per-highlight mode is active.
+    const singleFileSection = containerEl.createDiv();
+
+    singleFileSection.createEl('h2', { text: 'Combined book file' });
+
     let singleFileTemplateToggle: ToggleComponent;
     let singleFileTemplateText: SearchComponent;
 
-    new Setting(containerEl)
-      .setName('Custom combined-file template')
+    new Setting(singleFileSection)
+      .setName('Custom template')
       .setDesc('Use a custom template for the combined book highlights file')
       .addToggle((toggle) => {
         singleFileTemplateToggle = toggle;
         return toggle
-          .setValue(this.plugin.settings.customSingleFileTemplate)
+          .setValue(s.customSingleFileTemplate)
           .onChange(async (value) => {
-            this.plugin.settings.customSingleFileTemplate = value;
+            s.customSingleFileTemplate = value;
             await this.plugin.saveSettings();
             singleFileTemplateText.setDisabled(!value);
           });
       });
 
-    new Setting(containerEl)
-      .setName('Combined file template path')
+    new Setting(singleFileSection)
+      .setName('Template file')
       .setDesc('The template file to use')
       .addSearch((search) => {
         singleFileTemplateText = search;
         new FileSuggest(this.app, search.inputEl);
         search
           .setPlaceholder('templates/book-highlights.md')
-          .setValue(this.plugin.settings.singleFileTemplatePath)
-          .setDisabled(!this.plugin.settings.customSingleFileTemplate)
+          .setValue(s.singleFileTemplatePath)
+          .setDisabled(!s.customSingleFileTemplate)
           .onChange(async (value) => {
-            this.plugin.settings.singleFileTemplatePath = value;
+            s.singleFileTemplatePath = value;
             await this.plugin.saveSettings();
           });
       })
@@ -1306,8 +1413,8 @@ class KoreaderSettingTab extends PluginSettingTab {
             );
             try {
               await this.plugin.app.vault.create(filePath, DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE);
-              this.plugin.settings.singleFileTemplatePath = filePath;
-              this.plugin.settings.customSingleFileTemplate = true;
+              s.singleFileTemplatePath = filePath;
+              s.customSingleFileTemplate = true;
               await this.plugin.saveSettings();
               singleFileTemplateText.setValue(filePath).setDisabled(false);
               singleFileTemplateToggle.setValue(true);
@@ -1323,109 +1430,184 @@ class KoreaderSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl('h2', { text: 'Note title settings' });
+    updateSingleFileVisibility = () => {
+      singleFileSection.style.display = s.singleFilePerBook ? '' : 'none';
+    };
+    updateSingleFileVisibility();
 
-    new Setting(containerEl).setName('Prefix').addText((text) =>
+    // ── 6. DATAVIEW SUMMARY SETTINGS ────────────────────────────────
+    // Entire section (including heading) hides when dataview is disabled.
+    const dataviewSection = containerEl.createDiv();
+
+    dataviewSection.createEl('h2', { text: 'Dataview summary' });
+
+    let dataviewTemplateToggle: ToggleComponent;
+    let dataviewTemplateText: SearchComponent;
+
+    new Setting(dataviewSection)
+      .setName('Custom template')
+      .setDesc('Use a custom template for the Dataview summary note')
+      .addToggle((toggle) => {
+        dataviewTemplateToggle = toggle;
+        return toggle
+          .setValue(s.customDataviewTemplate)
+          .onChange(async (value) => {
+            s.customDataviewTemplate = value;
+            await this.plugin.saveSettings();
+            dataviewTemplateText.setDisabled(!value);
+          });
+      });
+
+    new Setting(dataviewSection)
+      .setName('Template file')
+      .setDesc('The template file to use')
+      .addSearch((search) => {
+        dataviewTemplateText = search;
+        new FileSuggest(this.app, search.inputEl);
+        search
+          .setPlaceholder('templates/template-book.md')
+          .setValue(s.dataviewTemplatePath)
+          .setDisabled(!s.customDataviewTemplate)
+          .onChange(async (value) => {
+            s.dataviewTemplatePath = value;
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText('Export default')
+          .onClick(async () => {
+            const filePath = normalizePath(
+              `${this.getTemplateFolderPath()}/koreader-dataview-template.md`
+            );
+            try {
+              await this.plugin.app.vault.create(filePath, DEFAULT_DATAVIEW_TEMPLATE);
+              s.dataviewTemplatePath = filePath;
+              s.customDataviewTemplate = true;
+              await this.plugin.saveSettings();
+              dataviewTemplateText.setValue(filePath).setDisabled(false);
+              dataviewTemplateToggle.setValue(true);
+              new Notice(`Template exported to ${filePath}`);
+            } catch (e) {
+              if (e.message?.includes('already exists')) {
+                new Notice(`Template already exists at ${filePath}`);
+              } else {
+                console.error(e);
+                new Notice(`Failed to export template: ${e.message}`);
+              }
+            }
+          })
+      );
+
+    updateDataviewVisibility = () => {
+      dataviewSection.style.display = s.createDataviewQuery && !s.singleFilePerBook ? '' : 'none';
+    };
+    updateDataviewVisibility();
+
+    // ── 6. BOOK TITLE FORMATTING ────────────────────────────────────
+    // Shown when any book-level naming is in use
+    const bookTitlesSection = containerEl.createDiv();
+
+    bookTitlesSection.createEl('h2', { text: 'Book title formatting' });
+    bookTitlesSection
+      .createEl('p', { cls: 'setting-item-description' })
+      .appendText(
+        'Applied to folder names, combined book files, and Dataview summary notes.'
+      );
+
+    new Setting(bookTitlesSection).setName('Prefix').addText((text) =>
       text
         .setPlaceholder('Enter the prefix')
-        .setValue(this.plugin.settings.noteTitleOptions.prefix)
+        .setValue(s.bookTitleOptions.prefix)
         .onChange(async (value) => {
-          this.plugin.settings.noteTitleOptions.prefix = value;
+          s.bookTitleOptions.prefix = value;
           await this.plugin.saveSettings();
         })
     );
-    new Setting(containerEl).setName('Suffix').addText((text) =>
+    new Setting(bookTitlesSection).setName('Suffix').addText((text) =>
       text
         .setPlaceholder('Enter the suffix')
-        .setValue(this.plugin.settings.noteTitleOptions.suffix)
+        .setValue(s.bookTitleOptions.suffix)
         .onChange(async (value) => {
-          this.plugin.settings.noteTitleOptions.suffix = value;
+          s.bookTitleOptions.suffix = value;
           await this.plugin.saveSettings();
         })
     );
-    new Setting(containerEl)
+    new Setting(bookTitlesSection)
       .setName('Max words')
       .setDesc(
-        'If is longer than this number of words, it will be truncated and "..." will be appended before the optional suffix'
+        'If longer than this number of words, the title will be truncated and "..." appended before the optional suffix'
       )
       .addSlider((number) =>
         number
           .setDynamicTooltip()
           .setLimits(0, 10, 1)
-          .setValue(this.plugin.settings.noteTitleOptions.maxWords)
+          .setValue(s.bookTitleOptions.maxWords)
           .onChange(async (value) => {
-            this.plugin.settings.noteTitleOptions.maxWords = value;
+            s.bookTitleOptions.maxWords = value;
             await this.plugin.saveSettings();
           })
       );
-    new Setting(containerEl)
+    new Setting(bookTitlesSection)
       .setName('Max length')
       .setDesc(
-        'If is longer than this number of characters, it will be truncated and "..." will be appended before the optional suffix'
+        'If longer than this number of characters, the title will be truncated and "..." appended before the optional suffix'
       )
       .addSlider((number) =>
         number
           .setDynamicTooltip()
           .setLimits(0, 50, 1)
-          .setValue(this.plugin.settings.noteTitleOptions.maxLength)
+          .setValue(s.bookTitleOptions.maxLength)
           .onChange(async (value) => {
-            this.plugin.settings.noteTitleOptions.maxLength = value;
+            s.bookTitleOptions.maxLength = value;
             await this.plugin.saveSettings();
           })
       );
 
-    containerEl.createEl('h2', { text: 'Book title settings' });
+    updateBookTitlesVisibility = () => {
+      bookTitlesSection.style.display = showBookTitles() ? '' : 'none';
+    };
+    updateBookTitlesVisibility();
 
-    new Setting(containerEl).setName('Prefix').addText((text) =>
-      text
-        .setPlaceholder('Enter the prefix')
-        .setValue(this.plugin.settings.bookTitleOptions.prefix)
-        .onChange(async (value) => {
-          this.plugin.settings.bookTitleOptions.prefix = value;
-          await this.plugin.saveSettings();
-        })
-    );
-    new Setting(containerEl).setName('Suffix').addText((text) =>
-      text
-        .setPlaceholder('Enter the suffix')
-        .setValue(this.plugin.settings.bookTitleOptions.suffix)
-        .onChange(async (value) => {
-          this.plugin.settings.bookTitleOptions.suffix = value;
-          await this.plugin.saveSettings();
-        })
-    );
+    // ── 7. SYNC BEHAVIOR ────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Sync behavior' });
+
     new Setting(containerEl)
-      .setName('Max words')
+      .setName('Keep in sync')
       .setDesc(
-        'If is longer than this number of words, it will be truncated and "..." will be appended before the optional suffix'
+        createFragment((frag) => {
+          frag.appendText(
+            'When to keep notes in sync with KOReader. ' +
+            'The value is written as koreader_keep_in_sync in each note\'s frontmatter ' +
+            'and can be overridden per note. (read the '
+          );
+          frag.createEl(
+            'a',
+            {
+              text: 'documentation',
+              href: 'https://github.com/Edo78/obsidian-koreader-sync#sync',
+            },
+            (a) => {
+              a.setAttr('target', '_blank');
+            }
+          );
+          frag.appendText(')');
+        })
       )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 10, 1)
-          .setValue(this.plugin.settings.bookTitleOptions.maxWords)
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('never', 'Never')
+          .addOption('always', 'Always')
+          .addOption('unfinished', 'Active books only (less than 100% read)')
+          .setValue(s.keepInSyncMode ?? 'never')
           .onChange(async (value) => {
-            this.plugin.settings.bookTitleOptions.maxWords = value;
-            await this.plugin.saveSettings();
-          })
-      );
-    new Setting(containerEl)
-      .setName('Max length')
-      .setDesc(
-        'If is longer than this number of characters, it will be truncated and "..." will be appended before the optional suffix'
-      )
-      .addSlider((number) =>
-        number
-          .setDynamicTooltip()
-          .setLimits(0, 50, 1)
-          .setValue(this.plugin.settings.bookTitleOptions.maxLength)
-          .onChange(async (value) => {
-            this.plugin.settings.bookTitleOptions.maxLength = value;
+            s.keepInSyncMode = value as KOReaderSettings['keepInSyncMode'];
             await this.plugin.saveSettings();
           })
       );
 
-    containerEl.createEl('h2', { text: 'DANGER ZONE' });
+    // ── 8. ADVANCED ─────────────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Advanced' });
 
     new Setting(containerEl)
       .setName('Enable reset of imported notes')
@@ -1434,9 +1616,9 @@ class KoreaderSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.enbleResetImportedNotes)
+          .setValue(s.enbleResetImportedNotes)
           .onChange(async (value) => {
-            this.plugin.settings.enbleResetImportedNotes = value;
+            s.enbleResetImportedNotes = value;
             await this.plugin.saveSettings();
           })
       );
