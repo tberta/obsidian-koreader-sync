@@ -659,6 +659,34 @@ export default class KOReader extends Plugin {
               new Notice(`KOReader: failed to create note "${finalNotePath}": ${msg}`);
               continue;
             }
+          } else {
+            // Note exists in vault but is not tracked in importedNotes
+            // (e.g. prefix/suffix/path settings changed). Rename to expected path if needed.
+            const existingNote = existingNotes[uniqueId].note;
+            if (existingNote instanceof TFile) {
+              const { notePath } = await this.createNote({
+                path,
+                uniqueId,
+                bookmark: data[book].bookmarks[bookmark],
+                managedBookTitle,
+                book: data[book],
+                keepInSync: bookKeepInSync,
+              });
+              const expectedPath = `${notePath}.md`;
+              if (existingNote.path !== expectedPath && !this.app.vault.getAbstractFileByPath(expectedPath)) {
+                const parentFolder = notePath.lastIndexOf('/') >= 0
+                  ? notePath.slice(0, notePath.lastIndexOf('/'))
+                  : '';
+                await this.ensureFolder(parentFolder);
+                try {
+                  await this.app.fileManager.renameFile(existingNote, expectedPath);
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  console.error(`KOReader: failed to rename note to ${expectedPath}:`, e);
+                  new Notice(`KOReader: failed to rename note to "${expectedPath}": ${msg}`);
+                }
+              }
+            }
           }
           this.settings.importedNotes[uniqueId] = true;
           importedSet.add(uniqueId);
