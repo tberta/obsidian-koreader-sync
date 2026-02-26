@@ -25,6 +25,9 @@ export interface Book {
   authors: string;
   bookmarks: Bookmarks;
   percent_finished: number;
+  last_read_date?: string;
+  status?: string;
+  checksum?: string;
 }
 
 export interface Books {
@@ -60,6 +63,8 @@ export interface ParsedLuaMetadata {
   percent_finished?: number;
   annotations?: Record<string, ParsedLuaAnnotation>;
   bookmarks?: Record<string, ParsedLuaBookmark>;
+  summary?: { modified?: string; status?: string };
+  partial_md5_checksum?: string;
 }
 
 /** Returned by KOReaderMetadata.scan() — carries books plus any per-file errors. */

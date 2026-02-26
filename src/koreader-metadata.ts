@@ -54,7 +54,7 @@ export class KOReaderMetadata {
         try {
           const content = fs.readFileSync(file, 'utf8');
           const jsonMetadata = parse(content) as ParsedLuaMetadata;
-          const { bookmarks, annotations, doc_props, percent_finished } = jsonMetadata;
+          const { bookmarks, annotations, doc_props, percent_finished, summary, partial_md5_checksum } = jsonMetadata;
 
           const sdrFallback = path.basename(path.dirname(file)).replace(/\.sdr$/, '');
           const title = decodeHtmlEntities(decodeLuaHexEscapes(doc_props?.title || sdrFallback));
@@ -115,6 +115,9 @@ export class KOReaderMetadata {
               authors: authors || 'Unknown',
               bookmarks: normalizedBookmarks,
               percent_finished: (percent_finished || 0) * 100,
+              last_read_date: summary?.modified,
+              status: summary?.status,
+              checksum: partial_md5_checksum,
             };
           }
         } catch (e) {

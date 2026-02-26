@@ -303,7 +303,7 @@ export default class KOReader extends Plugin {
         uniqueId,
         data: {
           title: book.title ?? '',
-          authors: book.authors ?? '',
+          authors: book.authors?.split('\n').map(a => a.trim()).filter(a => a) ?? [],
           chapter: bookmark.chapter ?? '',
           page,
           highlightText: bookmark.highlightText ?? '',
@@ -312,6 +312,8 @@ export default class KOReader extends Plugin {
         metadata: {
           body_hash: md5(body),
           managed_book_title: managedBookTitle,
+          last_read_date: book.last_read_date,
+          status: book.status,
         },
       },
     };
@@ -366,12 +368,15 @@ export default class KOReader extends Plugin {
         ...(contentHashes ? { contentHashes } : {}),
         data: {
           title: book.title ?? '',
-          authors: book.authors ?? '',
+          authors: book.authors?.split('\n').map(a => a.trim()).filter(a => a) ?? [],
         },
         metadata: {
           body_hash: md5(body),
           percent_finished: book.percent_finished,
           managed_book_title: managedBookTitle,
+          last_read_date: book.last_read_date,
+          status: book.status,
+          book_checksum: book.checksum,
         },
       },
     };
@@ -407,11 +412,14 @@ export default class KOReader extends Plugin {
         type: NoteType.BOOK_NOTE,
         data: {
           title: book.title,
-          authors: book.authors,
+          authors: book.authors?.split('\n').map(a => a.trim()).filter(a => a) ?? [],
         },
         metadata: {
           percent_finished: book.percent_finished,
           managed_title: managedBookTitle,
+          last_read_date: book.last_read_date,
+          status: book.status,
+          book_checksum: book.checksum,
         },
       },
     };
@@ -435,6 +443,19 @@ export default class KOReader extends Plugin {
         matter.stringify(body, mergedFrontmatter)
       );
     }
+  }
+
+  private findNoteByChecksum(checksum: string, type: NoteType): TFile | null {
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+      if (
+        fm?.[KOREADER_KEY]?.type === type &&
+        fm[KOREADER_KEY]?.metadata?.book_checksum === checksum
+      ) {
+        return f;
+      }
+    }
+    return null;
   }
 
   async importNotes() {
@@ -511,7 +532,9 @@ export default class KOReader extends Plugin {
           contentHashes[uniqueIds[i]] = bookmarkContentHash(bookmark);
         });
 
-        const existingFile = this.app.vault.getAbstractFileByPath(filePath) as TFile | null;
+        const existingFile = (data[book].checksum
+          ? this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_HIGHLIGHTS)
+          : this.app.vault.getAbstractFileByPath(filePath) as TFile | null);
         if (!existingFile) {
           const { content, frontmatterData } = await this.createBookHighlightsNote({
             path,
@@ -569,6 +592,15 @@ export default class KOReader extends Plugin {
                   : newContent;
                 await this.app.vault.modify(existingFile, matter.stringify(finalContent, frontmatterData));
               }
+            } else if (!existingFm?.metadata?.book_checksum) {
+              // No content change, but metadata fields added in a later version are missing — patch them.
+              await this.app.fileManager.processFrontMatter(existingFile, (fm) => {
+                if (!fm[KOREADER_KEY]?.metadata) return;
+                const book_ = data[book];
+                fm[KOREADER_KEY].metadata.book_checksum = book_.checksum;
+                fm[KOREADER_KEY].metadata.last_read_date = book_.last_read_date;
+                fm[KOREADER_KEY].metadata.status = book_.status;
+              });
             }
           }
         }
@@ -582,10 +614,14 @@ export default class KOReader extends Plugin {
 
       // if createDataviewQuery is set, create a dataview query, for each book, with the book's managed title (if it doesn't exist)
       if (this.settings.createDataviewQuery) {
-        const dvFile = this.app.vault.getAbstractFileByPath(`${path}/${managedBookTitle}.md`);
+        const dvFile = data[book].checksum
+          ? this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_NOTE)
+          : this.app.vault.getAbstractFileByPath(`${path}/${managedBookTitle}.md`) instanceof TFile
+            ? this.app.vault.getAbstractFileByPath(`${path}/${managedBookTitle}.md`) as TFile
+            : null;
         await this.createDataviewQueryPerBook(
           { path, managedBookTitle, book: data[book] },
-          dvFile instanceof TFile ? dvFile : undefined,
+          dvFile ?? undefined,
         );
       }
 
@@ -644,7 +680,19 @@ export default class KOReader extends Plugin {
           const newBodyHash = md5(newContent.includes(KOREADER_USER_SECTION_SEPARATOR)
             ? newContent.slice(0, newContent.indexOf(KOREADER_USER_SECTION_SEPARATOR))
             : newContent);
-          if (newBodyHash === existingFmData[KOREADER_KEY]?.metadata?.body_hash) continue;
+          if (newBodyHash === existingFmData[KOREADER_KEY]?.metadata?.body_hash) {
+            // No content change, but patch missing metadata fields added in a later version.
+            if (!existingFmData[KOREADER_KEY]?.metadata?.book_checksum) {
+              await this.app.fileManager.processFrontMatter(note, (fm) => {
+                if (!fm[KOREADER_KEY]?.metadata) return;
+                const book_ = data[book];
+                fm[KOREADER_KEY].metadata.book_checksum = book_.checksum;
+                fm[KOREADER_KEY].metadata.last_read_date = book_.last_read_date;
+                fm[KOREADER_KEY].metadata.status = book_.status;
+              });
+            }
+            continue;
+          }
           // Preserve user content below the separator
           const normalizedExisting = existingContent.startsWith('\n') ? existingContent.slice(1) : existingContent;
           const separatorIdx = normalizedExisting.indexOf(KOREADER_USER_SECTION_SEPARATOR);
