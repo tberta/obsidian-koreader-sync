@@ -48,5 +48,5 @@ esbuild.build({
 	logLevel: "info",
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,
-	outfile: 'main.js',
+	outfile: '/home/tberta/Documents/VAULT/PERSO/.obsidian/plugins/obsidian-koreader-plugin/main.js',
 }).catch(() => process.exit(1));

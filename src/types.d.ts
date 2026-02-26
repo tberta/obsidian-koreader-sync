@@ -81,7 +81,6 @@ export interface FrontMatterData {
 
 export interface FrontMatterMetadata {
   body_hash: string;
-  yet_to_be_edited: boolean;
   managed_book_title: string;
   percent_finished?: number;
 }
