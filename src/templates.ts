@@ -41,6 +41,14 @@ export const DEFAULT_DATAVIEW_TEMPLATE = `# Title: <%= it.data.title %>
 const title = dv.current()['koreader-sync'].metadata.managed_title
 dv.pages().where(n => {
 return n['koreader-sync'] && n['koreader-sync'].type == '${NoteType.SINGLE_NOTE}' && n['koreader-sync'].metadata.managed_book_title == title
-}).sort(p => p['koreader-sync'].data.page).forEach(p => dv.paragraph('![[' + p.file.path + ']]'))
+}).sort(p => p['koreader-sync'].data.page).forEach(p => {
+  const d = p['koreader-sync'].data
+  const chapter = d.chapter ? '**' + d.chapter + '**' : ''
+  const page = 'p. ' + d.page
+  const link = dv.fileLink(p.file.path)
+  dv.paragraph([chapter, page, link].filter(Boolean).join(' — '))
+  dv.paragraph('> ' + d.highlightText.split('\\n').join('\\n> '))
+  dv.paragraph('---')
+})
 \`\`\`
     `;
