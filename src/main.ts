@@ -116,7 +116,7 @@ export default class KOReader extends Plugin {
   async onload() {
     this.eta = new Eta({
       cache: true,
-      autoEscape: true,
+      autoEscape: false,
     });
     await this.loadSettings();
 

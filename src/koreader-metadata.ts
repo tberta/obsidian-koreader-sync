@@ -20,6 +20,19 @@ function decodeLuaHexEscapes(str: string): string {
   });
 }
 
+// Decode HTML entities that KOReader may embed in doc_props strings
+// (e.g. &#39; → ', &amp; → &).
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
 export class KOReaderMetadata {
   koreaderBasePath: string;
 
@@ -44,8 +57,8 @@ export class KOReaderMetadata {
           const { bookmarks, annotations, doc_props, percent_finished } = jsonMetadata;
 
           const sdrFallback = path.basename(path.dirname(file)).replace(/\.sdr$/, '');
-          const title = decodeLuaHexEscapes(doc_props?.title || sdrFallback);
-          const authors = decodeLuaHexEscapes(doc_props?.authors || 'Unknown');
+          const title = decodeHtmlEntities(decodeLuaHexEscapes(doc_props?.title || sdrFallback));
+          const authors = decodeHtmlEntities(decodeLuaHexEscapes(doc_props?.authors || 'Unknown'));
 
           if (!title) {
             console.warn(`KOReader: skipping ${file} - could not determine title`);
