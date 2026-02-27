@@ -394,11 +394,10 @@ export default class KOReader extends Plugin {
   ) {
     const { path, book, managedBookTitle } = dataview;
     let keepInSync = computeKeepInSync(this.settings.keepInSyncMode, book.percent_finished);
+    let rawExisting: string | undefined;
     if (updateNote) {
-      const { data, content } = matter(
-        await this.app.vault.read(updateNote),
-        {}
-      );
+      rawExisting = await this.app.vault.read(updateNote);
+      const { data } = matter(rawExisting, {});
       keepInSync = data.koreader_keep_in_sync ?? data[KOREADER_KEY]?.metadata?.keep_in_sync ?? false;
       if (!keepInSync) {
         return;
@@ -436,7 +435,36 @@ export default class KOReader extends Plugin {
       [KOREADER_KEY]: frontMatter[KOREADER_KEY],
     };
     if (updateNote) {
-      await this.app.vault.modify(updateNote, matter.stringify(body, mergedFrontmatter));
+      // Skip the write when nothing meaningful has changed.
+      //
+      // We compare the rendered body text directly rather than via a stored
+      // hash, because matter.stringify always appends a trailing '\n' to the
+      // body when the file is written, and other frontmatter plugins (e.g.
+      // "Update time on edit") may reformat the YAML on every save — making
+      // hash-based or full-string comparisons unreliable.
+      const existingParsed = matter(rawExisting!, {});
+      const existingMeta  = existingParsed.data?.[KOREADER_KEY]?.metadata;
+      // matter.stringify adds a trailing '\n' if the body lacks one; normalise
+      // to that same form so the comparison is stable.
+      const expectedBody  = body.endsWith('\n') ? body : body + '\n';
+      // Obsidian's YAML parser converts bare YYYY-MM-DD scalars to JS Date
+      // objects, which serialise back as full ISO strings ("2026-02-10T00:00:00.000Z").
+      // Compare only the date portion so the forms always match.
+      // Obsidian's YAML parser may return a JS Date object instead of a string.
+      const datePrefix = (d?: unknown): string | undefined => {
+        if (!d) return undefined;
+        if (d instanceof Date) return d.toISOString().slice(0, 10);
+        return String(d).slice(0, 10);
+      };
+      const bodyMatch          = existingParsed.content        === expectedBody;
+      const percentMatch       = existingMeta?.percent_finished === book.percent_finished;
+      const lastReadMatch      = datePrefix(existingMeta?.last_read_date) === datePrefix(book.last_read_date);
+      const statusMatch        = existingMeta?.status           === book.status;
+      const managedTitleMatch  = existingMeta?.managed_title    === managedBookTitle;
+      const unchanged = bodyMatch && percentMatch && lastReadMatch && statusMatch && managedTitleMatch;
+      if (!unchanged) {
+        await this.app.vault.modify(updateNote, matter.stringify(body, mergedFrontmatter));
+      }
     } else {
       this.app.vault.create(
         `${path}/${managedBookTitle}.md`,
@@ -641,23 +669,52 @@ export default class KOReader extends Plugin {
                 keepInSync: bookKeepInSync,
               });
 
-            // If a file already exists at this path (stale import or title
-            // collision between two bookmarks), disambiguate with a short
-            // uniqueId suffix rather than failing.
+            // If a file already exists at this path, check whether it is the
+            // same note before deciding what to do.  After an importedNotes
+            // reset the metadata cache may be stale, so the note won't appear
+            // in existingNotes even though it already lives on disk.
             let finalNotePath = notePath;
-            if (this.app.vault.getAbstractFileByPath(`${finalNotePath}.md`)) {
-              finalNotePath = `${notePath}_${uniqueId.substring(0, 6)}`;
-            }
-            try {
-              await this.app.vault.create(
-                `${finalNotePath}.md`,
-                matter.stringify(content, frontmatterData)
-              );
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              console.error(`KOReader: failed to create note ${finalNotePath}:`, e);
-              new Notice(`KOReader: failed to create note "${finalNotePath}": ${msg}`);
-              continue;
+            const fileAtExpectedPath = this.app.vault.getAbstractFileByPath(`${finalNotePath}.md`);
+            if (fileAtExpectedPath instanceof TFile) {
+              // Try to confirm identity via the metadata cache first (fast path).
+              let storedUniqueId = this.app.metadataCache.getFileCache(fileAtExpectedPath)?.frontmatter?.[KOREADER_KEY]?.uniqueId;
+              // Fall back to reading the file directly when the cache is stale.
+              if (!storedUniqueId) {
+                const raw = await this.app.vault.read(fileAtExpectedPath);
+                storedUniqueId = matter(raw).data?.[KOREADER_KEY]?.uniqueId;
+              }
+              if (storedUniqueId === uniqueId) {
+                // Same note — the metadata cache was stale.  Skip creation to
+                // avoid creating a duplicate, then fall through to re-register
+                // the uniqueId in importedNotes below.
+              } else {
+                // A genuinely different note occupies this path (title
+                // collision).  Disambiguate with a short uniqueId suffix.
+                finalNotePath = `${notePath}_${uniqueId.substring(0, 6)}`;
+                try {
+                  await this.app.vault.create(
+                    `${finalNotePath}.md`,
+                    matter.stringify(content, frontmatterData)
+                  );
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  console.error(`KOReader: failed to create note ${finalNotePath}:`, e);
+                  new Notice(`KOReader: failed to create note "${finalNotePath}": ${msg}`);
+                  continue;
+                }
+              }
+            } else {
+              try {
+                await this.app.vault.create(
+                  `${finalNotePath}.md`,
+                  matter.stringify(content, frontmatterData)
+                );
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                console.error(`KOReader: failed to create note ${finalNotePath}:`, e);
+                new Notice(`KOReader: failed to create note "${finalNotePath}": ${msg}`);
+                continue;
+              }
             }
           } else {
             // Note exists in vault but is not tracked in importedNotes
