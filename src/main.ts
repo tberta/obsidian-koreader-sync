@@ -463,6 +463,19 @@ export default class KOReader extends Plugin {
       const managedTitleMatch  = existingMeta?.managed_title    === managedBookTitle;
       const unchanged = bodyMatch && percentMatch && lastReadMatch && statusMatch && managedTitleMatch;
       if (!unchanged) {
+        console.debug('[KOReader] dataview note update triggered for', updateNote.path, {
+          bodyMatch,
+          percentMatch,     percentStored: existingMeta?.percent_finished, percentLive: book.percent_finished,
+          lastReadMatch,    lastReadStored: existingMeta?.last_read_date,  lastReadLive: book.last_read_date,
+          statusMatch,      statusStored: existingMeta?.status,            statusLive: book.status,
+          managedTitleMatch, managedTitleStored: existingMeta?.managed_title, managedTitleLive: managedBookTitle,
+          bodyDiff: !bodyMatch ? {
+            existingLength: existingParsed.content.length,
+            expectedLength: expectedBody.length,
+            existingTail: JSON.stringify(existingParsed.content.slice(-30)),
+            expectedTail: JSON.stringify(expectedBody.slice(-30)),
+          } : undefined,
+        });
         await this.app.vault.modify(updateNote, matter.stringify(body, mergedFrontmatter));
       }
     } else {
@@ -532,6 +545,58 @@ export default class KOReader extends Plugin {
     // Use a Set for O(1) membership checks instead of Object.keys().includes()
     const importedSet = new Set(Object.keys(this.settings.importedNotes));
 
+    // Migration: fix stale uniqueIds for PDF per-highlight notes.
+    // Before the pos normalization fix, PDF pos0/pos1 coordinate objects were
+    // serialized as "[object Object]" in template literals, so every bookmark in
+    // a PDF book collapsed to the same uniqueId. We repair those stored
+    // uniqueIds now, updating both the vault frontmatter and the in-memory maps
+    // so the rest of this sync runs with correct data immediately.
+    {
+      // Build (title|datetime) → correct uniqueId from the freshly-scanned data.
+      const correctIdByKey = new Map<string, string>();
+      for (const bookKey in data) {
+        const book = data[bookKey];
+        for (const bmKey in book.bookmarks) {
+          const bm = book.bookmarks[bmKey as any];
+          if (!bm.datetime) continue;
+          const key = `${book.title}|${bm.datetime}`;
+          // pos0/pos1 are already proper strings thanks to normalizePos() in the parser.
+          // Use datetime fallback when both pos values are empty (navigation bookmarks).
+          const posKey = (bm.pos0 || bm.pos1) ? `${bm.pos0} - ${bm.pos1}` : bm.datetime;
+          correctIdByKey.set(key, md5(`${book.title} - ${book.authors} - ${posKey}`));
+        }
+      }
+      // Scan SINGLE_NOTEs; repair any whose stored uniqueId is stale.
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+        if (fm?.[KOREADER_KEY]?.type !== NoteType.SINGLE_NOTE) continue;
+        const staleId        = fm[KOREADER_KEY]?.uniqueId as string | undefined;
+        const storedTitle    = fm[KOREADER_KEY]?.data?.title as string | undefined;
+        const storedDatetime = fm[KOREADER_KEY]?.data?.datetime as string | undefined;
+        if (!staleId || !storedTitle || !storedDatetime) continue;
+        const correctId = correctIdByKey.get(`${storedTitle}|${storedDatetime}`);
+        if (!correctId || correctId === staleId) continue;
+
+        console.log(`[KOReader] migrating uniqueId for ${f.path}: ${staleId} → ${correctId}`);
+        // Update the vault file.
+        await this.app.fileManager.processFrontMatter(f, (fmObj) => {
+          if (fmObj[KOREADER_KEY]) fmObj[KOREADER_KEY].uniqueId = correctId;
+        });
+        // Update in-memory maps so the rest of this sync sees the correct id.
+        const entry = existingNotes[staleId];
+        if (entry) {
+          existingNotes[correctId] = entry;
+          delete existingNotes[staleId];
+        }
+        if (importedSet.has(staleId)) {
+          importedSet.delete(staleId);
+          importedSet.add(correctId);
+          delete this.settings.importedNotes[staleId];
+          this.settings.importedNotes[correctId] = true;
+        }
+      }
+    }
+
     for (const book in data) {
       const { folder, basename } = this.resolveBookPath(data[book]);
       const managedBookTitle = basename;
@@ -547,9 +612,11 @@ export default class KOReader extends Plugin {
       if (this.settings.singleFilePerBook) {
         const filePath = `${path}/${managedBookTitle}.md`;
         const bookmarkKeys = Object.keys(data[book].bookmarks);
-        const uniqueIds = bookmarkKeys.map((bk) =>
-          md5(`${data[book].title} - ${data[book].authors} - ${data[book].bookmarks[bk as any].pos0} - ${data[book].bookmarks[bk as any].pos1}`)
-        );
+        const uniqueIds = bookmarkKeys.map((bk) => {
+          const bm = data[book].bookmarks[bk as any];
+          const posKey = (bm.pos0 || bm.pos1) ? `${bm.pos0} - ${bm.pos1}` : bm.datetime;
+          return md5(`${data[book].title} - ${data[book].authors} - ${posKey}`);
+        });
 
         // Build a map from uniqueId → bookmark and compute fresh content hashes
         const bookmarkByUniqueId: Record<string, Bookmark> = {};
@@ -654,7 +721,9 @@ export default class KOReader extends Plugin {
       }
 
       for (const bookmark in data[book].bookmarks) {
-        const uniqueId = md5(`${data[book].title} - ${data[book].authors} - ${data[book].bookmarks[bookmark].pos0} - ${data[book].bookmarks[bookmark].pos1}`);
+        const bm_ = data[book].bookmarks[bookmark];
+        const posKey_ = (bm_.pos0 || bm_.pos1) ? `${bm_.pos0} - ${bm_.pos1}` : bm_.datetime;
+        const uniqueId = md5(`${data[book].title} - ${data[book].authors} - ${posKey_}`);
 
         // if the note is not yet imported, we create it
         if (!importedSet.has(uniqueId)) {
@@ -759,28 +828,41 @@ export default class KOReader extends Plugin {
             book: data[book],
             keepInSync: existingNotes[uniqueId].keep_in_sync,
           });
-          // Skip write if rendered content hasn't changed (body_hash optimization)
+          // Skip write if rendered content hasn't changed.
+          // Compare against the hash of the actual on-disk body rather than the
+          // stored body_hash to handle cases where body_hash is stale (e.g. after
+          // a processFrontMatter call that didn't update it).
           const rawExisting = await this.app.vault.read(note);
           const { data: existingFmData, content: existingContent } = matter(rawExisting, {});
+          const normalizedExisting = existingContent.startsWith('\n') ? existingContent.slice(1) : existingContent;
+          const separatorIdx = normalizedExisting.indexOf(KOREADER_USER_SECTION_SEPARATOR);
+          const bodyOnDisk = separatorIdx !== -1
+            ? normalizedExisting.slice(0, separatorIdx)
+            : normalizedExisting;
+          const onDiskHash = md5(bodyOnDisk);
           const newBodyHash = md5(newContent.includes(KOREADER_USER_SECTION_SEPARATOR)
             ? newContent.slice(0, newContent.indexOf(KOREADER_USER_SECTION_SEPARATOR))
             : newContent);
-          if (newBodyHash === existingFmData[KOREADER_KEY]?.metadata?.body_hash) {
-            // No content change, but patch missing metadata fields added in a later version.
-            if (!existingFmData[KOREADER_KEY]?.metadata?.book_checksum) {
+          if (newBodyHash === onDiskHash) {
+            // Body unchanged. Repair any stale metadata in a single frontmatter pass.
+            const storedBodyHash = existingFmData[KOREADER_KEY]?.metadata?.body_hash;
+            const needsHashRepair    = storedBodyHash !== onDiskHash;
+            const needsChecksumPatch = !existingFmData[KOREADER_KEY]?.metadata?.book_checksum;
+            if (needsHashRepair || needsChecksumPatch) {
               await this.app.fileManager.processFrontMatter(note, (fm) => {
                 if (!fm[KOREADER_KEY]?.metadata) return;
-                const book_ = data[book];
-                fm[KOREADER_KEY].metadata.book_checksum = book_.checksum;
-                fm[KOREADER_KEY].metadata.last_read_date = book_.last_read_date;
-                fm[KOREADER_KEY].metadata.status = book_.status;
+                if (needsHashRepair) fm[KOREADER_KEY].metadata.body_hash = onDiskHash;
+                if (needsChecksumPatch) {
+                  const book_ = data[book];
+                  fm[KOREADER_KEY].metadata.book_checksum = book_.checksum;
+                  fm[KOREADER_KEY].metadata.last_read_date = book_.last_read_date;
+                  fm[KOREADER_KEY].metadata.status = book_.status;
+                }
               });
             }
             continue;
           }
-          // Preserve user content below the separator
-          const normalizedExisting = existingContent.startsWith('\n') ? existingContent.slice(1) : existingContent;
-          const separatorIdx = normalizedExisting.indexOf(KOREADER_USER_SECTION_SEPARATOR);
+          // Body genuinely changed — preserve user content below the separator.
           const userContent = separatorIdx !== -1
             ? normalizedExisting.slice(separatorIdx + KOREADER_USER_SECTION_SEPARATOR.length)
             : '';

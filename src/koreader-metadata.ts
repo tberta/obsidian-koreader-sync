@@ -5,6 +5,17 @@ import finder from 'node-find-files';
 import { parse } from 'lua-json';
 import { Books, Bookmarks, ParsedLuaMetadata, ScanResult } from './types';
 
+// Normalize pos0/pos1 values to stable strings.
+// PDF bookmarks store coordinates as objects {page, rotation, x, y, zoom};
+// EPUB bookmarks store CFI paths as plain strings. Both must produce a
+// string so that uniqueId (md5) computation is consistent and stable.
+function normalizePos(pos: unknown): string {
+  if (!pos) return '';
+  if (typeof pos === 'string') return pos;
+  if (typeof pos === 'object') return JSON.stringify(pos);
+  return String(pos);
+}
+
 // Decode Lua \xNN hex escape sequences (e.g. \xc2\xa0 → non-breaking space).
 // luaparse does not handle \xNN escapes (a Lua 5.2+ feature), so they appear
 // as literal backslash-x sequences in the parsed output.
@@ -85,8 +96,8 @@ export class KOReaderMetadata {
                 datetime: ann.datetime || '',
                 datetimeUpdated: ann.datetime_updated || undefined,
                 highlighted: true,
-                pos0: ann.pos0 || '',
-                pos1: ann.pos1 || '',
+                pos0: normalizePos(ann.pos0),
+                pos1: normalizePos(ann.pos1),
                 page: String(ann.pageno ?? -1),
               };
             }
@@ -102,8 +113,8 @@ export class KOReaderMetadata {
                 text: decodeLuaHexEscapes(bm.text || ''),
                 datetime: bm.datetime || '',
                 highlighted: bm.highlighted ?? false,
-                pos0: bm.pos0 || '',
-                pos1: bm.pos1 || '',
+                pos0: normalizePos(bm.pos0),
+                pos1: normalizePos(bm.pos1),
                 page: bm.page || '-1',
               };
             }
