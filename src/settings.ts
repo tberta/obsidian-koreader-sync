@@ -21,13 +21,11 @@ export interface KOReaderSettings {
   customSingleFileTemplate: boolean;
   singleFileTemplatePath?: string;
   importedNotes: { [key: string]: boolean };
-  enbleResetImportedNotes: boolean;
   bookFolderTemplate?: string;
 }
 
 export const DEFAULT_SETTINGS: KOReaderSettings = {
   importedNotes: {},
-  enbleResetImportedNotes: false,
   bookFolderTemplate: '',
   keepInSyncMode: 'never',
   aFolderForEachBook: false,

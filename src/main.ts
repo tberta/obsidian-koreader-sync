@@ -173,22 +173,6 @@ export default class KOReader extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: 'obsidian-koreader-plugin-reset-sync-list',
-      name: 'Reset Sync List',
-      checkCallback: (checking: boolean) => {
-        if (this.settings.enbleResetImportedNotes) {
-          if (!checking) {
-            this.settings.importedNotes = {};
-            this.settings.enbleResetImportedNotes = false;
-            this.saveSettings();
-          }
-          return true;
-        }
-        return false;
-      },
-    });
-
     this.addSettingTab(new KoreaderSettingTab(this.app, this));
   }
 

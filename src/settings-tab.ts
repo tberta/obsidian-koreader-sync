@@ -1,5 +1,6 @@
 import {
   App,
+  Modal,
   Notice,
   PluginSettingTab,
   SearchComponent,
@@ -11,6 +12,51 @@ import { KOReaderSettings } from './settings';
 import { DEFAULT_NOTE_TEMPLATE, DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE, DEFAULT_DATAVIEW_TEMPLATE } from './templates';
 import { FolderSuggest, FileSuggest } from './suggest';
 import type KOReader from './main';
+
+class ResetSyncListModal extends Modal {
+  private onConfirm: () => void;
+
+  constructor(app: App, onConfirm: () => void) {
+    super(app);
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    this.titleEl.setText('Reset sync list?');
+
+    const desc = contentEl.createEl('p');
+    desc.appendText('Before confirming, note the following:');
+
+    const ul = contentEl.createEl('ul');
+    ul.createEl('li').setText(
+      'Only the internal list of synced books is cleared — no files are deleted or moved.'
+    );
+    ul.createEl('li').setText(
+      'On the next sync, all books will be re-imported and any highlights modified on your e-reader will be written to your notes.'
+    );
+    ul.createEl('li').setText('Any notes you have written or edited yourself are preserved.');
+
+    const buttonRow = contentEl.createDiv({ cls: 'modal-button-container' });
+
+    const confirmBtn = buttonRow.createEl('button', {
+      text: 'Reset',
+      cls: 'mod-warning',
+    });
+    confirmBtn.addEventListener('click', () => {
+      this.onConfirm();
+      this.close();
+    });
+
+    const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
+    cancelBtn.addEventListener('click', () => this.close());
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
 
 export class KoreaderSettingTab extends PluginSettingTab {
   plugin: KOReader;
@@ -422,12 +468,14 @@ export class KoreaderSettingTab extends PluginSettingTab {
     containerEl.createEl('h2', { text: 'Advanced' });
 
     new Setting(containerEl)
-      .setName('Enable reset of imported notes')
-      .setDesc("Enable the command to empty the list of imported notes in case you can't recover from the trash one or more notes")
-      .addToggle((toggle) =>
-        toggle.setValue(s.enbleResetImportedNotes).onChange(async (value) => {
-          s.enbleResetImportedNotes = value;
-          await this.plugin.saveSettings();
+      .setName('Reset sync list')
+      .setDesc('Clear the internal list of imported books. No files are deleted. On next sync, all books are re-imported.')
+      .addButton((btn) =>
+        btn.setButtonText('Reset sync list').setWarning().onClick(() => {
+          new ResetSyncListModal(this.app, async () => {
+            this.plugin.settings.importedNotes = {};
+            await this.plugin.saveSettings();
+          }).open();
         })
       );
   }
