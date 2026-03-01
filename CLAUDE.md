@@ -23,7 +23,7 @@ Test fixture metadata files live in `test-files/` (copied `metadata.*.lua` from 
 
 This is an **Obsidian plugin** that syncs KOReader e-reader highlights and annotations into Obsidian vault notes.
 
-**Entry point:** `src/main.ts` — contains the main plugin class `KOReader` (~1400 lines), settings tab `KoreaderSettingTab`, and UI helpers `FolderSuggest`/`FileSuggest`.
+**Entry point:** `src/main.ts` — contains the main plugin class `KOReader`, settings tab `KoreaderSettingTab`, and UI helpers `FolderSuggest`/`FileSuggest`.
 
 **Metadata parser:** `src/koreader-metadata.ts` — scans KOReader device filesystem for `metadata.*.lua` files, parses them with `lua-json`, and normalizes into a `Books` structure. Handles both old KOReader format (`bookmarks` array) and new format (`annotations` array).
 

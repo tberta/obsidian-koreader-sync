@@ -35,14 +35,16 @@ export default class KOReader extends Plugin {
     if (!title) {
       return `${options.prefix || ''}${options.suffix || ''}`;
     }
-    // replace \ / and : with _
-    title = title.replace(/\\|\/|:/g, '_');
+    // replace characters forbidden on Windows/macOS/Linux filesystems with _
+    title = title.replace(/[\\/:*?"<>|]/g, '_');
+    // strip non-printable control characters, excluding whitespace (\t \n \r)
+    title = title.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
     // replace multiple underscores with one underscore
     title = title.replace(/_+/g, '_');
     // remove leading and trailing whitespace
     title = title.trim();
-    // remove leading and trailing underscores
-    title = title.replace(/^_+|_+$/g, '');
+    // remove leading and trailing underscores or dots (Windows rejects trailing dots)
+    title = title.replace(/^[_.]+|[_.]+$/g, '');
     // replace multiple spaces with one space
     title = title.replace(/\s+/g, ' ');
     // if options.maxLength is set, trim the title to that length and add '...'
@@ -61,13 +63,13 @@ export default class KOReader extends Plugin {
     const tpl = this.settings.bookFolderTemplate?.trim();
     if (!tpl) {
       // backward-compat: honour aFolderForEachBook
-      const managedTitle = `${this.manageTitle(book.title, this.settings.bookTitleOptions)}-${book.authors}`;
+      const managedTitle = `${this.manageTitle(book.title, this.settings.bookTitleOptions)}-${this.manageTitle(book.authors?.split('\n').map(a => a.trim()).filter(a => a).join(' & ') ?? '', {})}`;
       return this.settings.aFolderForEachBook
         ? { folder: managedTitle, basename: managedTitle }
         : { folder: '', basename: managedTitle };
     }
     const sanitizedTitle   = this.manageTitle(book.title,   this.settings.bookTitleOptions);
-    const sanitizedAuthors = this.manageTitle(book.authors, {});
+    const sanitizedAuthors = this.manageTitle(book.authors?.split('\n').map(a => a.trim()).filter(a => a).join(' & ') ?? '', {});
     const resolved = safeResolvePath(tpl, { title: sanitizedTitle, authors: sanitizedAuthors });
     const lastSlash = resolved.lastIndexOf('/');
     return lastSlash >= 0
@@ -278,7 +280,7 @@ export default class KOReader extends Plugin {
       : `${this.manageTitle(
           bookmark.highlightText || '',
           this.settings.noteTitleOptions
-        )} - ${book.authors}`;
+        )} - ${this.manageTitle(book.authors?.split('\n').map(a => a.trim()).filter(a => a).join(' & ') ?? '', {})}`;
     const notePath = normalizePath(`${path}/${noteTitle}`);
 
     const template = await this.getTemplate(this.settings.customTemplate, this.settings.templatePath, DEFAULT_NOTE_TEMPLATE);
