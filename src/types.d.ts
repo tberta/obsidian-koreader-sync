@@ -1,10 +1,15 @@
+import { NoteType } from './constants';
+
 export interface Bookmark {
   chapter: string;
+  /** Old KOReader format: formatted string containing page + note text. Empty in new format. */
   text: string;
   datetime: string;
   datetimeUpdated?: string;
-  notes: string;
-  userNote?: string;
+  /** Highlight text (the selected passage from the book). */
+  highlightText: string;
+  /** User-written annotation attached to the highlight (new format only). */
+  annotationText?: string;
   highlighted: boolean;
   pos0: string;
   pos1: string;
@@ -19,35 +24,76 @@ export interface Book {
   title: string;
   authors: string;
   bookmarks: Bookmarks;
-  highlight: any;
   percent_finished: number;
+  last_read_date?: string;
+  status?: string;
+  checksum?: string;
 }
 
 export interface Books {
   [fullTitle: string]: Book;
 }
 
+// ── Parsed Lua metadata shapes ────────────────────────────────────────────────
+
+export interface ParsedLuaAnnotation {
+  text?: string;
+  note?: string;
+  chapter?: string;
+  datetime?: string;
+  datetime_updated?: string;
+  pageno?: number;
+  pos0?: string;
+  pos1?: string;
+}
+
+export interface ParsedLuaBookmark {
+  text?: string;
+  notes?: string;
+  chapter?: string;
+  datetime?: string;
+  highlighted?: boolean;
+  pos0?: string;
+  pos1?: string;
+  page?: string;
+}
+
+export interface ParsedLuaMetadata {
+  doc_props?: { title?: string; authors?: string };
+  percent_finished?: number;
+  annotations?: Record<string, ParsedLuaAnnotation>;
+  bookmarks?: Record<string, ParsedLuaBookmark>;
+  summary?: { modified?: string; status?: string };
+  partial_md5_checksum?: string;
+}
+
+/** Returned by KOReaderMetadata.scan() — carries books plus any per-file errors. */
+export interface ScanResult {
+  books: Books;
+  errors: Array<{ file: string; reason: string }>;
+}
+
+// ── Obsidian frontmatter shapes ───────────────────────────────────────────────
+
 export interface FrontMatterData {
   title: string;
   authors: string;
   chapter?: string;
   page?: number;
-  highlight?: string;
+  highlightText?: string;
   datetime?: string;
 }
 
 export interface FrontMatterMetadata {
   body_hash: string;
-  keep_in_sync?: boolean; // deprecated: moved to top-level koreader_keep_in_sync
-  yet_to_be_edited: boolean;
   managed_book_title: string;
   percent_finished?: number;
 }
 
 export interface FrontMatter {
-  type: string;
+  type: NoteType;
   uniqueId?: string;
   uniqueIds?: string[];
-  data: FrontMatterData,
-  metadata: FrontMatterMetadata,
+  data: FrontMatterData;
+  metadata: FrontMatterMetadata;
 }

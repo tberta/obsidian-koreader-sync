@@ -17,15 +17,19 @@ npm run lint      # ESLint
 
 There are no automated tests. The build output is `main.js` (single bundled file), which Obsidian loads as the plugin.
 
+Test fixture metadata files live in `test-files/` (copied `metadata.*.lua` from a real device for manual sync testing).
+
 ## Architecture
 
 This is an **Obsidian plugin** that syncs KOReader e-reader highlights and annotations into Obsidian vault notes.
 
-**Entry point:** `src/main.ts` — contains the main plugin class `KOReader` (~1400 lines), settings tab `KoreaderSettingTab`, and UI helpers `FolderSuggest`/`FileSuggest`.
+**Entry point:** `src/main.ts` — contains the main plugin class `KOReader`, settings tab `KoreaderSettingTab`, and UI helpers `FolderSuggest`/`FileSuggest`.
 
 **Metadata parser:** `src/koreader-metadata.ts` — scans KOReader device filesystem for `metadata.*.lua` files, parses them with `lua-json`, and normalizes into a `Books` structure. Handles both old KOReader format (`bookmarks` array) and new format (`annotations` array).
 
 **Types:** `src/types.d.ts` — core interfaces: `Book`, `Bookmark`, `FrontMatter`.
+
+**Gotcha:** `Bookmark.pos0`/`pos1` are typed `string` but PDF annotations deliver coordinate objects from `lua-json`. `normalizePos()` in `koreader-metadata.ts` coerces them to strings at parse time.
 
 ### Data flow
 
@@ -50,17 +54,15 @@ Every synced note has a `koreader-sync` YAML block:
 ```yaml
 koreader-sync:
   type: "koreader-sync-note"   # or "book highlights" / "dataview"
-  uniqueId: "<md5>"            # derived from title + authors + position
+  uniqueId: "<md5>"            # md5(title - authors - pos0 - pos1); falls back to datetime when pos empty
   data:                        # note content: title, authors, chapter, page, highlight, datetime
   metadata:
-    body_hash: "<md5>"         # detects user edits to note body
-    keep_in_sync: true         # if false, plugin skips this note
-    yet_to_be_edited: true     # flipped to false when user edits the note
+    body_hash: "<md5>"         # md5 of note body (before separator); compared against on-disk body, not stored value
     managed_book_title: "..."
     percent_finished: 0.0
 ```
 
-Sync safety: a note is only updated if both `keep_in_sync=true` AND `yet_to_be_edited=true`. The plugin watches `metadataCache` changes to detect user edits and set `yet_to_be_edited=false`.
+Sync safety: `koreader_keep_in_sync` (top-level frontmatter bool) gates all note updates. Notes are skipped if false.
 
 ### Templates
 
