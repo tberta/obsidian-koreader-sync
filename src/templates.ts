@@ -17,22 +17,25 @@ export const DEFAULT_BOOK_HIGHLIGHTS_TEMPLATE = `# <%= it.title %>
 ### by: [[<%= it.authors.join(']], [[') %>]]
 
 <progress value="<%= it.percent_finished %>" max="100"> </progress>
-<% it.bookmarks.forEach(function(b) { %>
+<% let prevChapter = undefined; it.bookmarks.forEach(function(b) { if (b.chapter !== prevChapter) { prevChapter = b.chapter; -%>
+
 ---
 
 ### Chapter: <%= b.chapter %>
 
-Page: <%= b.page %>
+<% } %>
 
 > <%= b.highlightText.split('\\n').join('\\n> ') %>
+
+
+Page: <%= b.page %>
 
 <% if (b.text) { %>
 
 > [!note]
 > <%= b.text.split('\\n').join('\\n> ') %>
 
-<% } %>
-<% }) %>`;
+<% } %><% }) %>`;
 
 export const DEFAULT_DATAVIEW_TEMPLATE = `# Title: <%= it.data.title %>
 
