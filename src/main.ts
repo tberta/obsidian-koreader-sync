@@ -487,6 +487,7 @@ export default class KOReader extends Plugin {
   }
 
   async importNotes() {
+    new Notice('KOReader: sync started…');
     const metadata = new KOReaderMetadata(this.settings.koreaderBasePath);
     const { books: data, errors }: ScanResult = await metadata.scan();
     if (errors.length > 0) {
@@ -615,7 +616,8 @@ export default class KOReader extends Plugin {
         });
 
         const existingFile = (data[book].checksum
-          ? this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_HIGHLIGHTS)
+          ? (this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_HIGHLIGHTS)
+              ?? this.app.vault.getAbstractFileByPath(filePath) as TFile | null)
           : this.app.vault.getAbstractFileByPath(filePath) as TFile | null);
         if (!existingFile) {
           const { content, frontmatterData } = await this.createBookHighlightsNote({
@@ -696,10 +698,14 @@ export default class KOReader extends Plugin {
 
       // if createDataviewQuery is set, create a dataview query, for each book, with the book's managed title (if it doesn't exist)
       if (this.settings.createDataviewQuery) {
+        const dvFilePath = `${path}/${managedBookTitle}.md`;
         const dvFile = data[book].checksum
-          ? this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_NOTE)
-          : this.app.vault.getAbstractFileByPath(`${path}/${managedBookTitle}.md`) instanceof TFile
-            ? this.app.vault.getAbstractFileByPath(`${path}/${managedBookTitle}.md`) as TFile
+          ? (this.findNoteByChecksum(data[book].checksum, NoteType.BOOK_NOTE)
+              ?? (this.app.vault.getAbstractFileByPath(dvFilePath) instanceof TFile
+                ? this.app.vault.getAbstractFileByPath(dvFilePath) as TFile
+                : null))
+          : this.app.vault.getAbstractFileByPath(dvFilePath) instanceof TFile
+            ? this.app.vault.getAbstractFileByPath(dvFilePath) as TFile
             : null;
         await this.createDataviewQueryPerBook(
           { path, managedBookTitle, book: data[book] },
@@ -865,5 +871,6 @@ export default class KOReader extends Plugin {
       }
     }
     await this.saveSettings();
+    new Notice(`KOReader: sync complete — ${Object.keys(data).length} ebook(s) processed`);
   }
 }
